@@ -453,6 +453,7 @@ const server = http.createServer(async (req, res) => {
   const path = url.pathname;
   if (isRateLimited(req, path)) return json(res, 429, { error: 'Rate limit exceeded' });
   try {
+    if (req.method === 'GET' && path === '/') return json(res, 200, { ok: true, service: 'galaga-skill-wager-be', version: '0.8.0', health: '/api/health' });
     if (req.method === 'GET' && path === '/api/health') return json(res, 200, { ok: true, service: 'galaga-skill-wager-be', phase: 8, version: '0.8.0', waves: 10, antiCheatMode: String(process.env.ANTI_CHEAT_MODE || 'enforce'), storeSchema: 8 });
 
     if (req.method === 'GET' && path === '/api/admin/telemetry/summary') {
