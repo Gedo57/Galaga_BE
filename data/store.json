@@ -1,0 +1,17 @@
+{
+  "players": {
+    "demo-player": {
+      "id": "demo-player",
+      "displayName": "STARBLAST",
+      "balance": 5000,
+      "activeSessionId": null
+    }
+  },
+  "sessions": {},
+  "transactions": [],
+  "telemetry": {
+    "version": 1,
+    "events": []
+  },
+  "schemaVersion": 8
+}
