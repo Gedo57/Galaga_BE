@@ -101,6 +101,7 @@ function json(res, status, payload) {
     'Content-Type': 'application/json; charset=utf-8',
     'Access-Control-Allow-Headers': 'Content-Type, X-Client-Version, X-Admin-Key',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Max-Age': '86400',
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
@@ -401,21 +402,34 @@ function isLanDevelopmentOrigin(origin) {
     return false;
   }
 }
+const DEFAULT_PRODUCTION_ORIGINS = Object.freeze([
+  'https://galaga-fe.vercel.app'
+]);
+function normalizeCorsOrigin(value = '') {
+  return String(value || '').trim().replace(/\/$/, '');
+}
 function resolveCorsOrigin(req) {
-  const origin = String(req.headers.origin || '');
+  const origin = normalizeCorsOrigin(req.headers.origin || '');
   const production = process.env.NODE_ENV === 'production';
-  const configured = String(process.env.CORS_ORIGIN || (production ? '' : '*'));
-  const allowed = configured.split(',').map((value) => value.trim()).filter(Boolean);
+  const configured = String(process.env.CORS_ORIGIN || (production ? '' : '*')).trim();
+  const configuredOrigins = configured
+    .split(',')
+    .map(normalizeCorsOrigin)
+    .filter(Boolean);
 
   if (!production) {
-    if (!origin) return configured === '*' ? '*' : (allowed[0] || '*');
-    if (configured === '*' || allowed.includes(origin) || isLanDevelopmentOrigin(origin)) return origin;
+    if (!origin) return configured === '*' ? '*' : (configuredOrigins[0] || '*');
+    if (configured === '*' || configuredOrigins.includes(origin) || isLanDevelopmentOrigin(origin)) return origin;
     return null;
   }
 
+  // Keep the production FE reachable even if Render's CORS_ORIGIN env var is
+  // missing, stale, or was not applied by a previous deployment. Explicit
+  // configured origins remain additive, and '*' is still honored when chosen.
   if (configured === '*') return '*';
-  if (!origin) return allowed[0] || null;
-  return allowed.includes(origin) ? origin : null;
+  const allowed = new Set([...DEFAULT_PRODUCTION_ORIGINS, ...configuredOrigins]);
+  if (!origin) return DEFAULT_PRODUCTION_ORIGINS[0];
+  return allowed.has(origin) ? origin : null;
 }
 function isRateLimited(req, path) {
   if (req.method === 'OPTIONS' || path === '/api/health') return false;
