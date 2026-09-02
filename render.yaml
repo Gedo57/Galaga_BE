@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: galaga-be
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CORS_ORIGIN
+        value: "*"
+      - key: ANTI_CHEAT_MODE
+        value: enforce
+      - key: RATE_LIMIT_PER_MINUTE
+        value: "240"
+      - key: MAX_BODY_BYTES
+        value: "131072"
+      - key: TELEMETRY_MAX_EVENTS
+        value: "20000"
