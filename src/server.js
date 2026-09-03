@@ -11,6 +11,11 @@ const PORT = Number(process.env.PORT || 3001);
 const ENTRY_MIN = 50;
 const ENTRY_STEP = 50;
 const ENTRY_MAX = 1_000_000;
+const configuredDefaultPlayerBalance = Number(process.env.DEFAULT_PLAYER_BALANCE);
+const DEFAULT_PLAYER_BALANCE = Number.isFinite(configuredDefaultPlayerBalance)
+  ? Math.max(0, Math.min(1_000_000_000, configuredDefaultPlayerBalance))
+  : 5000;
+const PLAYER_ID_PATTERN = /^player-[A-Za-z0-9_-]{12,96}$/;
 const DIFFICULTY_ECONOMY = Object.freeze({
   easy: Object.freeze({
     startMultiplier: 1.50, comboWindow: 2.50,
@@ -379,6 +384,26 @@ function startNextWave(session) {
   session.coreState.finalBossPhase = session.wave === 10 ? 1 : 0;
   session.updatedAt = now();
 }
+function normalizePlayerId(value) {
+  const playerId = String(value || '').trim();
+  return PLAYER_ID_PATTERN.test(playerId) ? playerId : null;
+}
+function ensurePlayer(store, requestedPlayerId) {
+  const playerId = normalizePlayerId(requestedPlayerId);
+  if (!playerId) return null;
+  if (!store.players[playerId]) {
+    store.players[playerId] = {
+      id: playerId,
+      displayName: 'STARBLAST',
+      balance: DEFAULT_PLAYER_BALANCE,
+      activeSessionId: null,
+      createdAt: now(),
+      updatedAt: now()
+    };
+    return { player: store.players[playerId], created: true };
+  }
+  return { player: store.players[playerId], created: false };
+}
 function getPlayerPayload(store, playerId) {
   const player = store.players[playerId];
   if (!player) return null;
@@ -467,8 +492,8 @@ const server = http.createServer(async (req, res) => {
   const path = url.pathname;
   if (isRateLimited(req, path)) return json(res, 429, { error: 'Rate limit exceeded' });
   try {
-    if (req.method === 'GET' && path === '/') return json(res, 200, { ok: true, service: 'galaga-skill-wager-be', version: '0.8.0', health: '/api/health' });
-    if (req.method === 'GET' && path === '/api/health') return json(res, 200, { ok: true, service: 'galaga-skill-wager-be', phase: 8, version: '0.8.0', waves: 10, antiCheatMode: String(process.env.ANTI_CHEAT_MODE || 'enforce'), storeSchema: 8 });
+    if (req.method === 'GET' && path === '/') return json(res, 200, { ok: true, service: 'galaga-skill-wager-be', version: '0.8.1', health: '/api/health' });
+    if (req.method === 'GET' && path === '/api/health') return json(res, 200, { ok: true, service: 'galaga-skill-wager-be', phase: 8, version: '0.8.1', waves: 10, antiCheatMode: String(process.env.ANTI_CHEAT_MODE || 'enforce'), storeSchema: 8 });
 
     if (req.method === 'GET' && path === '/api/admin/telemetry/summary') {
       if (!adminAuthorized(req)) return json(res, 401, { error: 'Admin authorization required' });
@@ -492,10 +517,22 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { session, antiCheat: session.antiCheat || null, transactions, events });
     }
 
+    if (req.method === 'POST' && path === '/api/players/ensure') {
+      const body = await readBody(req);
+      const store = readStore();
+      const ensured = ensurePlayer(store, body.playerId);
+      if (!ensured) return json(res, 400, { error: 'Invalid player ID' });
+      if (ensured.created) writeStore(store);
+      const active = ensured.player.activeSessionId ? store.sessions[ensured.player.activeSessionId] : null;
+      if (autoSettleExpiredCheckpoint(store, active)) writeStore(store);
+      return json(res, ensured.created ? 201 : 200, getPlayerPayload(store, ensured.player.id));
+    }
+
     const playerMatch = path.match(/^\/api\/players\/([^/]+)$/);
     if (req.method === 'GET' && playerMatch) {
       const store = readStore();
-      const playerId = decodeURIComponent(playerMatch[1]);
+      const playerId = normalizePlayerId(decodeURIComponent(playerMatch[1]));
+      if (!playerId) return json(res, 400, { error: 'Invalid player ID' });
       const player = store.players[playerId];
       if (!player) return json(res, 404, { error: 'Player not found' });
       const active = player.activeSessionId ? store.sessions[player.activeSessionId] : null;
@@ -505,14 +542,15 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && path === '/api/sessions/start') {
       const body = await readBody(req);
-      const playerId = String(body.playerId || '');
+      const playerId = normalizePlayerId(body.playerId);
+      if (!playerId) return json(res, 400, { error: 'Invalid player ID' });
       const entryAmount = Number(body.entryAmount);
       const difficulty = String(body.difficulty || '').toLowerCase();
       if (!validEntryAmount(entryAmount)) return json(res, 400, { error: `Invalid entry amount. Use ${ENTRY_STEP}-coin steps from ${ENTRY_MIN}.` });
       if (!ALLOWED_DIFFICULTIES.has(difficulty)) return json(res, 400, { error: 'Invalid difficulty' });
       const store = readStore();
-      const player = store.players[playerId];
-      if (!player) return json(res, 404, { error: 'Player not found' });
+      const ensured = ensurePlayer(store, playerId);
+      const player = ensured.player;
       if (player.activeSessionId) {
         const active = store.sessions[player.activeSessionId];
         if (active && !['RESULT', 'RUN_LOST', 'BOSS_COMPLETE'].includes(active.state)) return json(res, 409, { error: 'Player already has an active run', activeSession: active });
@@ -533,6 +571,7 @@ const server = http.createServer(async (req, res) => {
       };
       store.sessions[session.id] = session;
       player.activeSessionId = session.id;
+      player.updatedAt = now();
       const debit = transaction(store, { playerId, sessionId: session.id, type: 'ENTRY_DEBIT', amount: -entryAmount, balanceAfter: player.balance, meta: { difficulty } });
       session.entryTransactionId = debit.id;
       recordTelemetry(store, { type: 'session_start', playerId, sessionId: session.id, wave: 1, difficulty, data: { entryAmount, clientVersion: session.clientVersion } });
