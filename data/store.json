@@ -5,6 +5,14 @@
       "displayName": "STARBLAST",
       "balance": 5000,
       "activeSessionId": null
+    },
+    "player-c5b159e63167b23308ec5a89158f4dc6": {
+      "id": "player-c5b159e63167b23308ec5a89158f4dc6",
+      "displayName": "STARBLAST",
+      "balance": 5000,
+      "activeSessionId": null,
+      "createdAt": "2026-09-04T15:37:50.672Z",
+      "updatedAt": "2026-09-04T15:37:50.673Z"
     }
   },
   "sessions": {},
