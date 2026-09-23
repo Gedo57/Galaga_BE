@@ -707,16 +707,12 @@ const server = http.createServer(async (req, res) => {
       if (!session) return json(res, 404, { error: 'Session not found' });
       if (session.state === 'RESULT') return json(res, 200, { player: store.players[session.playerId], session, autoCashout: session.cashout?.mode === 'auto' });
       if (session.state !== 'CHECKPOINT') return json(res, 409, { error: `Checkpoint decision cannot run from ${session.state}` });
-      if (autoSettleExpiredCheckpoint(store, session)) {
-        writeStore(store);
-        return json(res, 200, { player: store.players[session.playerId], session, autoCashout: true });
-      }
       const action = String(body.action || '').toLowerCase();
-      if (action === 'cashout' || action === 'auto') {
-        const auto = action === 'auto';
-        const payload = settleCashout(store, session, auto ? 'auto' : 'manual'); writeStore(store);
-        return json(res, 200, { ...payload, autoCashout: auto });
-      }
+
+      // Explicit player input wins the checkpoint race when it reaches the server
+      // before an AUTO request has actually settled the session. Previously the
+      // server checked the wall-clock deadline first, so a legitimate Continue
+      // click near the deadline could be converted into an automatic cashout.
       if (action === 'continue') {
         if (session.wave >= 10) return json(res, 409, { error: 'Final Boss is the last wave' });
         session.checkpointHistory ||= [];
@@ -724,6 +720,16 @@ const server = http.createServer(async (req, res) => {
         recordTelemetry(store, { type: 'checkpoint_continue', playerId: session.playerId, sessionId: session.id, wave: session.wave, difficulty: session.difficulty, data: { score: session.score } });
         startNextWave(session); recordTelemetry(store, { type: 'wave_begin', playerId: session.playerId, sessionId: session.id, wave: session.wave, difficulty: session.difficulty }); writeStore(store);
         return json(res, 200, { player: store.players[session.playerId], session, autoCashout: false });
+      }
+
+      if (autoSettleExpiredCheckpoint(store, session)) {
+        writeStore(store);
+        return json(res, 200, { player: store.players[session.playerId], session, autoCashout: true });
+      }
+      if (action === 'cashout' || action === 'auto') {
+        const auto = action === 'auto';
+        const payload = settleCashout(store, session, auto ? 'auto' : 'manual'); writeStore(store);
+        return json(res, 200, { ...payload, autoCashout: auto });
       }
       return json(res, 400, { error: 'Decision must be cashout, auto, or continue' });
     }

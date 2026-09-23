@@ -13,13 +13,306 @@
       "activeSessionId": null,
       "createdAt": "2026-09-04T15:37:50.672Z",
       "updatedAt": "2026-09-04T15:37:50.673Z"
+    },
+    "player-e852db078ae71287024ec43d3bfa0f9d": {
+      "id": "player-e852db078ae71287024ec43d3bfa0f9d",
+      "displayName": "STARBLAST",
+      "balance": 4950,
+      "activeSessionId": null,
+      "createdAt": "2026-09-23T20:57:17.447Z",
+      "updatedAt": "2026-09-23T20:57:20.300Z"
     }
   },
-  "sessions": {},
-  "transactions": [],
+  "sessions": {
+    "9c831cae-224e-4417-817a-ccf15463d2b7": {
+      "id": "9c831cae-224e-4417-817a-ccf15463d2b7",
+      "playerId": "player-e852db078ae71287024ec43d3bfa0f9d",
+      "entryAmount": 50,
+      "difficulty": "medium",
+      "state": "RUN_LOST",
+      "wave": 2,
+      "score": 3158,
+      "lives": 3,
+      "reward": 0,
+      "gameSeed": "21588944-9ebe-44c8-a020-76d0c03f5a83",
+      "coreState": {
+        "kills": 12,
+        "shotsFired": 89,
+        "shotsHit": 36,
+        "damageTaken": 0,
+        "killsByType": {
+          "fighter": 8,
+          "diver": 2,
+          "shooter": 2,
+          "heavy": 0,
+          "charger": 0,
+          "elite": 0,
+          "miniBoss": 0,
+          "finalBoss": 0
+        },
+        "bombKillsByType": {
+          "fighter": 0,
+          "diver": 0,
+          "shooter": 0,
+          "heavy": 0,
+          "charger": 0,
+          "elite": 0,
+          "miniBoss": 0,
+          "finalBoss": 0
+        },
+        "dangerKillsByType": {
+          "fighter": 0,
+          "diver": 2,
+          "shooter": 0,
+          "heavy": 0,
+          "charger": 0,
+          "elite": 0,
+          "miniBoss": 0,
+          "finalBoss": 0
+        },
+        "patternActivations": {
+          "singleDive": 6,
+          "twinDive": 0,
+          "zigzag": 0,
+          "pincer": 0,
+          "swarm": 0,
+          "crossfire": 0,
+          "spiral": 0,
+          "charge": 0,
+          "eliteAssault": 0
+        },
+        "lastPattern": "singleDive",
+        "comboIndex": 0,
+        "comboMultiplier": 1,
+        "comboTimer": 0,
+        "overdriveEnergy": 48,
+        "overdriveActiveRemaining": 0,
+        "bombUsed": false,
+        "bombAvailable": true,
+        "waveElapsed": 0,
+        "enemiesRemaining": 16,
+        "miniBossHp": 0,
+        "miniBossMaxHp": 0,
+        "finalBossHp": 0,
+        "finalBossMaxHp": 0,
+        "finalBossPhase": 0
+      },
+      "waveState": {
+        "startCore": {
+          "score": 3158,
+          "kills": 12,
+          "shotsFired": 89,
+          "shotsHit": 36,
+          "damageTaken": 0,
+          "killsByType": {
+            "fighter": 8,
+            "diver": 2,
+            "shooter": 2,
+            "heavy": 0,
+            "charger": 0,
+            "elite": 0,
+            "miniBoss": 0,
+            "finalBoss": 0
+          },
+          "bombKillsByType": {
+            "fighter": 0,
+            "diver": 0,
+            "shooter": 0,
+            "heavy": 0,
+            "charger": 0,
+            "elite": 0,
+            "miniBoss": 0,
+            "finalBoss": 0
+          },
+          "dangerKillsByType": {
+            "fighter": 0,
+            "diver": 2,
+            "shooter": 0,
+            "heavy": 0,
+            "charger": 0,
+            "elite": 0,
+            "miniBoss": 0,
+            "finalBoss": 0
+          },
+          "patternActivations": {
+            "singleDive": 6,
+            "twinDive": 0,
+            "zigzag": 0,
+            "pincer": 0,
+            "swarm": 0,
+            "crossfire": 0,
+            "spiral": 0,
+            "charge": 0,
+            "eliteAssault": 0
+          }
+        },
+        "startedAt": "2026-09-23T20:57:44.711Z",
+        "lastResult": null
+      },
+      "completedWaves": [
+        {
+          "wave": 1,
+          "combatScore": 2158,
+          "accuracy": 40.45,
+          "accuracyRate": 0,
+          "accuracyBonus": 0,
+          "perfectBonus": 1000,
+          "aceBonus": 0,
+          "waveKills": 12,
+          "damageTaken": 0,
+          "duration": 20.95,
+          "scoreAfterBonuses": 3158,
+          "cumulativeKillsByType": {
+            "fighter": 8,
+            "diver": 2,
+            "shooter": 2,
+            "heavy": 0,
+            "charger": 0,
+            "elite": 0,
+            "miniBoss": 0,
+            "finalBoss": 0
+          },
+          "cumulativeBombKillsByType": {
+            "fighter": 0,
+            "diver": 0,
+            "shooter": 0,
+            "heavy": 0,
+            "charger": 0,
+            "elite": 0,
+            "miniBoss": 0,
+            "finalBoss": 0
+          },
+          "cumulativeDangerKillsByType": {
+            "fighter": 0,
+            "diver": 2,
+            "shooter": 0,
+            "heavy": 0,
+            "charger": 0,
+            "elite": 0,
+            "miniBoss": 0,
+            "finalBoss": 0
+          }
+        }
+      ],
+      "checkpoint": null,
+      "checkpointHistory": [],
+      "cashout": null,
+      "bossComplete": null,
+      "antiCheat": {
+        "riskScore": 0,
+        "flags": [],
+        "rejectedSnapshots": 0,
+        "reviewRequired": false,
+        "lastCheckedAt": "2026-09-23T20:57:43.249Z"
+      },
+      "clientVersion": "0.8.1",
+      "createdAt": "2026-09-23T20:57:20.299Z",
+      "updatedAt": "2026-09-23T20:57:48.009Z",
+      "entryTransactionId": "5151606c-ee22-4e69-96f4-084ede54a50f"
+    }
+  },
+  "transactions": [
+    {
+      "id": "5151606c-ee22-4e69-96f4-084ede54a50f",
+      "playerId": "player-e852db078ae71287024ec43d3bfa0f9d",
+      "sessionId": "9c831cae-224e-4417-817a-ccf15463d2b7",
+      "type": "ENTRY_DEBIT",
+      "amount": -50,
+      "balanceAfter": 4950,
+      "meta": {
+        "difficulty": "medium"
+      },
+      "createdAt": "2026-09-23T20:57:20.300Z"
+    },
+    {
+      "id": "65e394cc-682f-40a9-8830-d23dad3d0f4c",
+      "playerId": "player-e852db078ae71287024ec43d3bfa0f9d",
+      "sessionId": "9c831cae-224e-4417-817a-ccf15463d2b7",
+      "type": "ABANDON_SETTLEMENT",
+      "amount": 0,
+      "balanceAfter": 4950,
+      "meta": {
+        "wave": 2,
+        "score": 3158
+      },
+      "createdAt": "2026-09-23T20:57:48.009Z"
+    }
+  ],
   "telemetry": {
     "version": 1,
-    "events": []
+    "events": [
+      {
+        "id": "5d11632d-06e8-43be-91c5-31a3e793cd35",
+        "type": "session_start",
+        "playerId": "player-e852db078ae71287024ec43d3bfa0f9d",
+        "sessionId": "9c831cae-224e-4417-817a-ccf15463d2b7",
+        "wave": 1,
+        "difficulty": "medium",
+        "data": {
+          "entryAmount": 50,
+          "clientVersion": "0.8.1"
+        },
+        "createdAt": "2026-09-23T20:57:20.300Z"
+      },
+      {
+        "id": "f4ad340f-fb88-45de-90aa-fdbd5999ba49",
+        "type": "countdown",
+        "playerId": "player-e852db078ae71287024ec43d3bfa0f9d",
+        "sessionId": "9c831cae-224e-4417-817a-ccf15463d2b7",
+        "wave": 1,
+        "difficulty": "medium",
+        "data": {},
+        "createdAt": "2026-09-23T20:57:20.311Z"
+      },
+      {
+        "id": "4ab15506-8c66-4140-bf01-65a816314b47",
+        "type": "wave_begin",
+        "playerId": "player-e852db078ae71287024ec43d3bfa0f9d",
+        "sessionId": "9c831cae-224e-4417-817a-ccf15463d2b7",
+        "wave": 1,
+        "difficulty": "medium",
+        "data": {},
+        "createdAt": "2026-09-23T20:57:22.135Z"
+      },
+      {
+        "id": "03c801d3-2460-4d72-8166-195cfc5d404f",
+        "type": "wave_clear",
+        "playerId": "player-e852db078ae71287024ec43d3bfa0f9d",
+        "sessionId": "9c831cae-224e-4417-817a-ccf15463d2b7",
+        "wave": 1,
+        "difficulty": "medium",
+        "data": {
+          "score": 3158,
+          "accuracy": 40.45,
+          "duration": 20.95,
+          "damageTaken": 0,
+          "combatScore": 2158
+        },
+        "createdAt": "2026-09-23T20:57:43.249Z"
+      },
+      {
+        "id": "ce50933a-e64b-49ff-9add-278e32d2e8be",
+        "type": "wave_begin",
+        "playerId": "player-e852db078ae71287024ec43d3bfa0f9d",
+        "sessionId": "9c831cae-224e-4417-817a-ccf15463d2b7",
+        "wave": 2,
+        "difficulty": "medium",
+        "data": {},
+        "createdAt": "2026-09-23T20:57:44.711Z"
+      },
+      {
+        "id": "d6d66d6b-1deb-47f4-afef-454e596570d9",
+        "type": "run_abandon",
+        "playerId": "player-e852db078ae71287024ec43d3bfa0f9d",
+        "sessionId": "9c831cae-224e-4417-817a-ccf15463d2b7",
+        "wave": 2,
+        "difficulty": "medium",
+        "data": {
+          "score": 3158
+        },
+        "createdAt": "2026-09-23T20:57:48.009Z"
+      }
+    ]
   },
   "schemaVersion": 8
 }
