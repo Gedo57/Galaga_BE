@@ -4,10 +4,13 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { ensurePhase8Store, recordTelemetry, validateCoreSnapshot, applyValidationResult, buildTelemetrySummary, buildBalanceReport, PHASE8_TARGETS, bossHpForDifficulty } from './production.js';
+import { createSideSixClient } from './sidesix.js';
+import { platformSessionStore } from './platformSessionStore.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STORE_PATH = process.env.STORE_PATH ? resolve(process.env.STORE_PATH) : join(__dirname, '..', 'data', 'store.json');
 const PORT = Number(process.env.PORT || 3001);
+const sideSix = createSideSixClient();
 const ENTRY_MIN = 50;
 const ENTRY_STEP = 50;
 const ENTRY_MAX = 1_000_000;
@@ -101,10 +104,14 @@ function writeStore(store) {
   writeFileSync(tempPath, JSON.stringify(store, null, 2));
   renameSync(tempPath, STORE_PATH);
 }
+function jsonReplacer(key, value) {
+  if (key === 'sideSix' || key === 'authorizeTransactionId' || key === 'sessionTokenHash') return undefined;
+  return value;
+}
 function json(res, status, payload) {
   const headers = {
     'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Client-Version, X-Admin-Key',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Client-Version, X-Admin-Key',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
     'Access-Control-Max-Age': '86400',
     'Cache-Control': 'no-store',
@@ -115,7 +122,7 @@ function json(res, status, payload) {
   };
   if (res.__corsOrigin) headers['Access-Control-Allow-Origin'] = res.__corsOrigin;
   res.writeHead(status, headers);
-  res.end(JSON.stringify(payload));
+  res.end(JSON.stringify(payload, jsonReplacer));
 }
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -318,10 +325,59 @@ function buildSettlement(session, tier, mode) {
     mode, score: session.score, settledAt: now()
   };
 }
-function applySettlementCredit(store, session, cashout, transactionType) {
+function isExternalWalletSession(session) {
+  return Boolean(sideSix.configuration.enabled && session?.walletMode === 'SIDESIX' && session?.sideSix?.userId);
+}
+async function settleSideSixPrize(store, session, cashout) {
+  if (!isExternalWalletSession(session)) return;
+  const wallet = session.sideSix;
+  if (wallet.settlementStatus === 'settled') return;
+  const requestId = wallet.settleRequestId || sideSix.requestId('galaga', session.id, 'settle');
+  wallet.settleRequestId = requestId;
+  wallet.settlementStatus = 'pending';
+  wallet.pendingPrize = cashout.reward;
+  wallet.pendingCashout = { ...cashout };
+  writeStore(store);
+  await sideSix.settle({
+    userId: wallet.userId,
+    wonPrizeValue: cashout.reward,
+    authorizeTransactionId: wallet.authorizeTransactionId,
+    requestId,
+    playId: 1,
+  });
+  wallet.settlementStatus = 'settled';
+  wallet.pendingPrize = null;
+  wallet.pendingCashout = null;
+  wallet.settledAt = now();
+}
+async function refundUnstartedSideSixRun(store, session, reason = 'game_failed') {
+  if (!isExternalWalletSession(session)) return false;
+  const wallet = session.sideSix;
+  if (wallet.playStarted || wallet.refundStatus === 'refunded') return false;
+  const requestId = wallet.refundRequestId || sideSix.requestId('galaga', session.id, 'refund');
+  wallet.refundRequestId = requestId;
+  wallet.refundStatus = 'pending';
+  writeStore(store);
+  await sideSix.refund({
+    userId: wallet.userId,
+    authorizeTransactionId: wallet.authorizeTransactionId,
+    requestId,
+    reason,
+  });
+  wallet.refundStatus = 'refunded';
+  wallet.refundedAt = now();
+  return true;
+}
+async function applySettlementCredit(store, session, cashout, transactionType) {
   const player = store.players[session.playerId];
   if (!player) throw new Error('Player not found');
-  player.balance += cashout.reward;
+  if (isExternalWalletSession(session)) {
+    await settleSideSixPrize(store, session, cashout);
+    player.balance = null;
+    player.walletMode = 'SIDESIX';
+  } else {
+    player.balance += cashout.reward;
+  }
   session.cashout = cashout;
   session.cashoutWave = cashout.wave;
   session.cashoutMultiplier = cashout.multiplier;
@@ -331,27 +387,33 @@ function applySettlementCredit(store, session, cashout, transactionType) {
   transaction(store, {
     playerId: player.id, sessionId: session.id, type: transactionType,
     amount: cashout.reward, balanceAfter: player.balance,
-    meta: { wave: cashout.wave, multiplier: cashout.multiplier, tierWave: cashout.tierWave, mode: cashout.mode }
+    meta: { wave: cashout.wave, multiplier: cashout.multiplier, tierWave: cashout.tierWave, mode: cashout.mode, walletMode: session.walletMode || 'LOCAL' }
   });
   return player;
 }
-function settleCashout(store, session, mode = 'manual') {
+async function settleCashout(store, session, mode = 'manual') {
   if (session.state === 'RESULT' && session.cashout) return { player: store.players[session.playerId], session };
   if (session.state !== 'CHECKPOINT') throw new Error(`Cashout cannot settle from ${session.state}`);
+  const pendingCashout = isExternalWalletSession(session) && session.sideSix?.settlementStatus === 'pending'
+    ? session.sideSix.pendingCashout
+    : null;
   const tier = unlockedTier(session);
-  const cashout = buildSettlement(session, tier, mode);
+  const cashout = pendingCashout || buildSettlement(session, tier, mode);
   session.checkpointHistory ||= [];
-  if (session.checkpoint) session.checkpointHistory.push({ ...session.checkpoint, decision: mode === 'auto' ? 'AUTO_CASHOUT' : 'CASHOUT', decidedAt: cashout.settledAt });
-  const player = applySettlementCredit(store, session, cashout, 'CASHOUT_CREDIT');
+  if (!pendingCashout && session.checkpoint) session.checkpointHistory.push({ ...session.checkpoint, decision: mode === 'auto' ? 'AUTO_CASHOUT' : 'CASHOUT', decidedAt: cashout.settledAt });
+  const player = await applySettlementCredit(store, session, cashout, 'CASHOUT_CREDIT');
   session.state = 'RESULT';
   recordTelemetry(store, { type: mode === 'auto' ? 'cashout_auto' : 'cashout_manual', playerId: session.playerId, sessionId: session.id, wave: session.wave, difficulty: session.difficulty, data: { score: session.score, multiplier: cashout.multiplier, reward: cashout.reward, netProfit: cashout.netProfit, tierWave: cashout.tierWave } });
   return { player, session };
 }
-function settleBossCompletion(store, session) {
+async function settleBossCompletion(store, session) {
   if (session.state === 'BOSS_COMPLETE' && session.cashout) return { player: store.players[session.playerId], session };
+  const pendingCashout = isExternalWalletSession(session) && session.sideSix?.settlementStatus === 'pending'
+    ? session.sideSix.pendingCashout
+    : null;
   const tier = unlockedTier(session);
-  const cashout = buildSettlement(session, tier, 'boss_complete');
-  const player = applySettlementCredit(store, session, cashout, 'FINAL_PAYOUT_CREDIT');
+  const cashout = pendingCashout || buildSettlement(session, tier, 'boss_complete');
+  const player = await applySettlementCredit(store, session, cashout, 'FINAL_PAYOUT_CREDIT');
   session.state = 'BOSS_COMPLETE';
   session.bossComplete = {
     bossKilled: true,
@@ -362,10 +424,10 @@ function settleBossCompletion(store, session) {
   recordTelemetry(store, { type: 'boss_complete', playerId: session.playerId, sessionId: session.id, wave: 10, difficulty: session.difficulty, data: { score: session.score, multiplier: cashout.multiplier, reward: cashout.reward, finalTierUnlocked: tier?.wave === 10 } });
   return { player, session };
 }
-function autoSettleExpiredCheckpoint(store, session) {
+async function autoSettleExpiredCheckpoint(store, session) {
   if (!session || session.state !== 'CHECKPOINT' || !session.checkpoint?.decisionDeadline) return false;
   if (Date.now() < Date.parse(session.checkpoint.decisionDeadline)) return false;
-  settleCashout(store, session, 'auto');
+  await settleCashout(store, session, 'auto');
   return true;
 }
 function startNextWave(session) {
@@ -388,27 +450,72 @@ function normalizePlayerId(value) {
   const playerId = String(value || '').trim();
   return PLAYER_ID_PATTERN.test(playerId) ? playerId : null;
 }
-function ensurePlayer(store, requestedPlayerId) {
-  const playerId = normalizePlayerId(requestedPlayerId);
+function playerIdForIdentity(identity, requestedPlayerId) {
+  if (sideSix.configuration.enabled) {
+    if (!identity?.userId) return null;
+    return `player-sidesix-${identity.userId}`;
+  }
+  return normalizePlayerId(requestedPlayerId);
+}
+function ensurePlayer(store, requestedPlayerId, identity = null) {
+  const playerId = playerIdForIdentity(identity, requestedPlayerId);
   if (!playerId) return null;
   if (!store.players[playerId]) {
     store.players[playerId] = {
       id: playerId,
-      displayName: 'STARBLAST',
-      balance: DEFAULT_PLAYER_BALANCE,
+      displayName: identity?.userName || 'STARBLAST',
+      balance: sideSix.configuration.enabled ? null : DEFAULT_PLAYER_BALANCE,
+      walletMode: sideSix.configuration.enabled ? 'SIDESIX' : 'LOCAL',
       activeSessionId: null,
       createdAt: now(),
       updatedAt: now()
     };
     return { player: store.players[playerId], created: true };
   }
-  return { player: store.players[playerId], created: false };
+  const player = store.players[playerId];
+  if (sideSix.configuration.enabled) {
+    player.displayName = identity?.userName || player.displayName || 'PLAYER';
+    player.balance = null;
+    player.walletMode = 'SIDESIX';
+  }
+  return { player, created: false };
 }
 function getPlayerPayload(store, playerId) {
   const player = store.players[playerId];
   if (!player) return null;
   const activeSession = player.activeSessionId ? store.sessions[player.activeSessionId] || null : null;
   return { player, activeSession };
+}
+
+function bearerToken(req) {
+  const header = String(req.headers.authorization || '');
+  const match = header.match(/^Bearer\s+([A-Fa-f0-9]{64})$/);
+  return match ? match[1] : '';
+}
+function requirePlatformIdentity(req) {
+  if (!sideSix.configuration.enabled) return null;
+  const token = bearerToken(req);
+  const session = token ? platformSessionStore.get(token) : null;
+  if (!session?.userId) {
+    const error = new Error('Valid SideSix launch session required');
+    error.status = 401;
+    error.statusCode = 401;
+    error.code = 'SIDESIX_SESSION_REQUIRED';
+    throw error;
+  }
+  return session;
+}
+function assertSessionOwnership(session, identity) {
+  if (!sideSix.configuration.enabled) return;
+  const ownerUserId = String(session?.sideSix?.userId || '');
+  const requestUserId = String(identity?.userId || '');
+  if (!ownerUserId || !requestUserId || ownerUserId !== requestUserId) {
+    const error = new Error('Session does not belong to the SideSix player');
+    error.status = 403;
+    error.statusCode = 403;
+    error.code = 'SIDESIX_SESSION_MISMATCH';
+    throw error;
+  }
 }
 
 const RATE_BUCKETS = new Map();
@@ -494,6 +601,23 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && path === '/') return json(res, 200, { ok: true, service: 'galaga-skill-wager-be', version: '0.8.1', health: '/api/health' });
     if (req.method === 'GET' && path === '/api/health') return json(res, 200, { ok: true, service: 'galaga-skill-wager-be', phase: 8, version: '0.8.1', waves: 10, antiCheatMode: String(process.env.ANTI_CHEAT_MODE || 'enforce'), storeSchema: 8 });
+    if (req.method === 'POST' && path === '/api/platform/launch') {
+      if (!sideSix.configuration.enabled) return json(res, 200, { ok: true, mode: 'LOCAL', token: null, identity: null });
+      const body = await readBody(req);
+      const identity = sideSix.verifyLaunch(body);
+      const platform = platformSessionStore.create(identity);
+      return json(res, 201, {
+        ok: true,
+        mode: 'SIDESIX',
+        token: platform.token,
+        identity: {
+          userId: identity.userId,
+          userName: identity.userName,
+          returnUrl: identity.returnUrl,
+          currency: sideSix.configuration.currency
+        }
+      });
+    }
 
     if (req.method === 'GET' && path === '/api/admin/telemetry/summary') {
       if (!adminAuthorized(req)) return json(res, 401, { error: 'Admin authorization required' });
@@ -517,64 +641,149 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { session, antiCheat: session.antiCheat || null, transactions, events });
     }
 
+    const platformIdentity = requirePlatformIdentity(req);
+
     if (req.method === 'POST' && path === '/api/players/ensure') {
       const body = await readBody(req);
       const store = readStore();
-      const ensured = ensurePlayer(store, body.playerId);
+      const ensured = ensurePlayer(store, body.playerId, platformIdentity);
       if (!ensured) return json(res, 400, { error: 'Invalid player ID' });
       if (ensured.created) writeStore(store);
       const active = ensured.player.activeSessionId ? store.sessions[ensured.player.activeSessionId] : null;
-      if (autoSettleExpiredCheckpoint(store, active)) writeStore(store);
+      if (await autoSettleExpiredCheckpoint(store, active)) writeStore(store);
       return json(res, ensured.created ? 201 : 200, getPlayerPayload(store, ensured.player.id));
     }
 
     const playerMatch = path.match(/^\/api\/players\/([^/]+)$/);
     if (req.method === 'GET' && playerMatch) {
       const store = readStore();
-      const playerId = normalizePlayerId(decodeURIComponent(playerMatch[1]));
+      const requestedPlayerId = decodeURIComponent(playerMatch[1]);
+      const playerId = playerIdForIdentity(platformIdentity, requestedPlayerId);
       if (!playerId) return json(res, 400, { error: 'Invalid player ID' });
       const player = store.players[playerId];
       if (!player) return json(res, 404, { error: 'Player not found' });
       const active = player.activeSessionId ? store.sessions[player.activeSessionId] : null;
-      if (autoSettleExpiredCheckpoint(store, active)) writeStore(store);
+      if (await autoSettleExpiredCheckpoint(store, active)) writeStore(store);
       return json(res, 200, getPlayerPayload(store, playerId));
     }
 
     if (req.method === 'POST' && path === '/api/sessions/start') {
       const body = await readBody(req);
-      const playerId = normalizePlayerId(body.playerId);
+      const playerId = playerIdForIdentity(platformIdentity, body.playerId);
       if (!playerId) return json(res, 400, { error: 'Invalid player ID' });
       const entryAmount = Number(body.entryAmount);
       const difficulty = String(body.difficulty || '').toLowerCase();
       if (!validEntryAmount(entryAmount)) return json(res, 400, { error: `Invalid entry amount. Use ${ENTRY_STEP}-coin steps from ${ENTRY_MIN}.` });
       if (!ALLOWED_DIFFICULTIES.has(difficulty)) return json(res, 400, { error: 'Invalid difficulty' });
+
       const store = readStore();
-      const ensured = ensurePlayer(store, playerId);
+      const ensured = ensurePlayer(store, playerId, platformIdentity);
       const player = ensured.player;
-      if (player.activeSessionId) {
-        const active = store.sessions[player.activeSessionId];
-        if (active && !['RESULT', 'RUN_LOST', 'BOSS_COMPLETE'].includes(active.state)) return json(res, 409, { error: 'Player already has an active run', activeSession: active });
+      let session = player.activeSessionId ? store.sessions[player.activeSessionId] : null;
+
+      if (session && !['RESULT', 'RUN_LOST', 'BOSS_COMPLETE'].includes(session.state)) {
+        const sameRunRequest = Number(session.entryAmount) === entryAmount && session.difficulty === difficulty;
+        if (sideSix.configuration.enabled && sameRunRequest && session.state === 'ENTRY_PAID' && session.sideSix?.authorizeTransactionId) {
+          return json(res, 200, { player, session });
+        }
+        if (!(sideSix.configuration.enabled && sameRunRequest && session.state === 'AUTHORIZING')) {
+          return json(res, 409, { error: 'Player already has an active run', activeSession: session });
+        }
+      } else if (session) {
         player.activeSessionId = null;
+        session = null;
       }
-      if (player.balance < entryAmount) return json(res, 409, { error: 'Insufficient coin balance' });
-      player.balance -= entryAmount;
-      const created = now();
-      const session = {
-        id: randomUUID(), playerId, entryAmount, difficulty, state: 'ENTRY_PAID', wave: 1,
-        score: 0, lives: 3, reward: 0, gameSeed: randomUUID(),
-        coreState: defaultCore(),
-        waveState: { startCore: null, startedAt: null, lastResult: null },
-        completedWaves: [], checkpoint: null, checkpointHistory: [], cashout: null, bossComplete: null,
-        antiCheat: { riskScore: 0, flags: [], rejectedSnapshots: 0, reviewRequired: false },
-        clientVersion: String(req.headers['x-client-version'] || 'unknown').slice(0, 32),
-        createdAt: created, updatedAt: created
-      };
-      store.sessions[session.id] = session;
-      player.activeSessionId = session.id;
-      player.updatedAt = now();
-      const debit = transaction(store, { playerId, sessionId: session.id, type: 'ENTRY_DEBIT', amount: -entryAmount, balanceAfter: player.balance, meta: { difficulty } });
-      session.entryTransactionId = debit.id;
-      recordTelemetry(store, { type: 'session_start', playerId, sessionId: session.id, wave: 1, difficulty, data: { entryAmount, clientVersion: session.clientVersion } });
+
+      if (!session) {
+        const sessionId = randomUUID();
+        const created = now();
+        session = {
+          id: sessionId,
+          playerId,
+          entryAmount,
+          difficulty,
+          state: sideSix.configuration.enabled ? 'AUTHORIZING' : 'ENTRY_PAID',
+          walletMode: sideSix.configuration.enabled ? 'SIDESIX' : 'LOCAL',
+          sideSix: sideSix.configuration.enabled ? {
+            userId: platformIdentity.userId,
+            authorizeTransactionId: null,
+            authorizeRequestId: sideSix.requestId('galaga', sessionId, 'authorize'),
+            playStarted: false,
+            settlementStatus: 'authorizing',
+            refundStatus: null,
+          } : null,
+          score: 0,
+          lives: 3,
+          reward: 0,
+          gameSeed: randomUUID(),
+          coreState: defaultCore(),
+          waveState: { startCore: null, startedAt: null, lastResult: null },
+          completedWaves: [],
+          checkpoint: null,
+          checkpointHistory: [],
+          cashout: null,
+          bossComplete: null,
+          antiCheat: { riskScore: 0, flags: [], rejectedSnapshots: 0, reviewRequired: false },
+          clientVersion: String(req.headers['x-client-version'] || 'unknown').slice(0, 32),
+          createdAt: created,
+          updatedAt: created,
+        };
+
+        if (!sideSix.configuration.enabled) {
+          if (player.balance < entryAmount) return json(res, 409, { error: 'Insufficient coin balance' });
+          player.balance -= entryAmount;
+        } else {
+          player.balance = null;
+          player.walletMode = 'SIDESIX';
+        }
+
+        store.sessions[session.id] = session;
+        player.activeSessionId = session.id;
+        player.updatedAt = now();
+        writeStore(store);
+      }
+
+      if (sideSix.configuration.enabled && session.state === 'AUTHORIZING') {
+        try {
+          const authorized = await sideSix.authorize({
+            userId: session.sideSix.userId,
+            playCost: session.entryAmount,
+            requestId: session.sideSix.authorizeRequestId,
+          });
+          session.sideSix.authorizeTransactionId = authorized.transactionId;
+          session.sideSix.settlementStatus = 'authorized';
+          session.sideSix.authorizedAt = now();
+          session.state = 'ENTRY_PAID';
+          session.updatedAt = now();
+        } catch (error) {
+          if (error?.code === 'INSUFFICIENT_BALANCE') {
+            if (player.activeSessionId === session.id) player.activeSessionId = null;
+            delete store.sessions[session.id];
+            writeStore(store);
+          }
+          throw error;
+        }
+      }
+
+      if (!session.entryTransactionId) {
+        const debit = transaction(store, {
+          playerId,
+          sessionId: session.id,
+          type: 'ENTRY_DEBIT',
+          amount: -entryAmount,
+          balanceAfter: player.balance,
+          meta: { difficulty, walletMode: session.walletMode },
+        });
+        session.entryTransactionId = debit.id;
+        recordTelemetry(store, {
+          type: 'session_start',
+          playerId,
+          sessionId: session.id,
+          wave: 1,
+          difficulty,
+          data: { entryAmount, clientVersion: session.clientVersion, walletMode: session.walletMode },
+        });
+      }
       writeStore(store);
       return json(res, 201, { player, session });
     }
@@ -584,7 +793,8 @@ const server = http.createServer(async (req, res) => {
       const store = readStore();
       const session = store.sessions[getSessionMatch[1]];
       if (!session) return json(res, 404, { error: 'Session not found' });
-      if (autoSettleExpiredCheckpoint(store, session)) writeStore(store);
+      assertSessionOwnership(session, platformIdentity);
+      if (await autoSettleExpiredCheckpoint(store, session)) writeStore(store);
       return json(res, 200, { session, player: store.players[session.playerId] });
     }
 
@@ -592,6 +802,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && countdownMatch) {
       const store = readStore(); const session = store.sessions[countdownMatch[1]];
       if (!session) return json(res, 404, { error: 'Session not found' });
+      assertSessionOwnership(session, platformIdentity);
       if (session.state !== 'ENTRY_PAID') return json(res, 409, { error: `Invalid session transition: ${session.state} -> COUNTDOWN` });
       session.state = 'COUNTDOWN'; session.updatedAt = now(); recordTelemetry(store, { type: 'countdown', playerId: session.playerId, sessionId: session.id, wave: session.wave, difficulty: session.difficulty }); writeStore(store); return json(res, 200, { session });
     }
@@ -600,8 +811,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && beginMatch) {
       const store = readStore(); const session = store.sessions[beginMatch[1]];
       if (!session) return json(res, 404, { error: 'Session not found' });
+      assertSessionOwnership(session, platformIdentity);
       if (!['COUNTDOWN', 'ENTRY_PAID'].includes(session.state)) return json(res, 409, { error: `Invalid session transition: ${session.state} -> WAVE_PLAYING` });
       session.state = 'WAVE_PLAYING'; session.waveState = { startCore: coreStart(session), startedAt: now(), lastResult: null };
+      if (isExternalWalletSession(session)) session.sideSix.playStarted = true;
       session.coreState.waveElapsed = 0; session.coreState.enemiesRemaining = WAVE[session.wave]?.enemies || 0;
       session.updatedAt = now(); recordTelemetry(store, { type: 'wave_begin', playerId: session.playerId, sessionId: session.id, wave: session.wave, difficulty: session.difficulty }); writeStore(store); return json(res, 200, { session });
     }
@@ -610,6 +823,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && coreMatch) {
       const body = await readBody(req); const store = readStore(); const session = store.sessions[coreMatch[1]];
       if (!session) return json(res, 404, { error: 'Session not found' });
+      assertSessionOwnership(session, platformIdentity);
       if (session.state !== 'WAVE_PLAYING') return json(res, 409, { error: `Core state cannot update from ${session.state}` });
       const validation = validateIncomingSnapshot(store, session, body, { endpoint: 'core-state' });
       if (!validation.ok && antiCheatEnforced()) { writeStore(store); return json(res, 422, { error: 'Snapshot rejected by server validation', validation: { flags: validation.flags, riskScore: session.antiCheat.riskScore } }); }
@@ -620,6 +834,23 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && clearMatch) {
       const body = await readBody(req); const store = readStore(); const session = store.sessions[clearMatch[1]];
       if (!session) return json(res, 404, { error: 'Session not found' });
+      assertSessionOwnership(session, platformIdentity);
+      if (
+        isExternalWalletSession(session)
+        && session.sideSix?.settlementStatus === 'pending'
+        && session.sideSix?.pendingCashout?.mode === 'boss_complete'
+      ) {
+        const settled = await settleBossCompletion(store, session);
+        writeStore(store);
+        return json(res, 200, {
+          player: settled.player,
+          session,
+          waveResult: session.waveState?.lastResult || null,
+          checkpoint: null,
+          bossComplete: session.bossComplete,
+          recoveredSettlement: true,
+        });
+      }
       if (session.state !== 'WAVE_PLAYING') return json(res, 409, { error: `Wave cannot clear from ${session.state}` });
       if (Number(body.wave) !== Number(session.wave)) return json(res, 409, { error: 'Wave mismatch' });
       const def = WAVE[session.wave];
@@ -676,7 +907,7 @@ const server = http.createServer(async (req, res) => {
 
       let player = store.players[session.playerId];
       if (def.final) {
-        const settled = settleBossCompletion(store, session);
+        const settled = await settleBossCompletion(store, session);
         player = settled.player;
       } else if (def.checkpoint) {
         session.state = 'CHECKPOINT';
@@ -696,6 +927,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && nextMatch) {
       const store = readStore(); const session = store.sessions[nextMatch[1]];
       if (!session) return json(res, 404, { error: 'Session not found' });
+      assertSessionOwnership(session, platformIdentity);
       if (session.state !== 'WAVE_CLEAR') return json(res, 409, { error: `Automatic wave advance cannot run from ${session.state}` });
       if (session.wave >= 10) return json(res, 409, { error: 'Final Boss is the last wave' });
       startNextWave(session); recordTelemetry(store, { type: 'wave_begin', playerId: session.playerId, sessionId: session.id, wave: session.wave, difficulty: session.difficulty }); writeStore(store); return json(res, 200, { session });
@@ -705,6 +937,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && decisionMatch) {
       const body = await readBody(req); const store = readStore(); const session = store.sessions[decisionMatch[1]];
       if (!session) return json(res, 404, { error: 'Session not found' });
+      assertSessionOwnership(session, platformIdentity);
       if (session.state === 'RESULT') return json(res, 200, { player: store.players[session.playerId], session, autoCashout: session.cashout?.mode === 'auto' });
       if (session.state !== 'CHECKPOINT') return json(res, 409, { error: `Checkpoint decision cannot run from ${session.state}` });
       const action = String(body.action || '').toLowerCase();
@@ -722,13 +955,13 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { player: store.players[session.playerId], session, autoCashout: false });
       }
 
-      if (autoSettleExpiredCheckpoint(store, session)) {
+      if (await autoSettleExpiredCheckpoint(store, session)) {
         writeStore(store);
         return json(res, 200, { player: store.players[session.playerId], session, autoCashout: true });
       }
       if (action === 'cashout' || action === 'auto') {
         const auto = action === 'auto';
-        const payload = settleCashout(store, session, auto ? 'auto' : 'manual'); writeStore(store);
+        const payload = await settleCashout(store, session, auto ? 'auto' : 'manual'); writeStore(store);
         return json(res, 200, { ...payload, autoCashout: auto });
       }
       return json(res, 400, { error: 'Decision must be cashout, auto, or continue' });
@@ -738,6 +971,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && closeMatch) {
       const store = readStore(); const session = store.sessions[closeMatch[1]];
       if (!session) return json(res, 404, { error: 'Session not found' });
+      assertSessionOwnership(session, platformIdentity);
       if (!['RESULT', 'RUN_LOST', 'BOSS_COMPLETE'].includes(session.state)) return json(res, 409, { error: `Cannot close active session from ${session.state}` });
       const player = store.players[session.playerId];
       if (player?.activeSessionId === session.id) player.activeSessionId = null;
@@ -749,6 +983,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && loseMatch) {
       const body = await readBody(req); const store = readStore(); const session = store.sessions[loseMatch[1]];
       if (!session) return json(res, 404, { error: 'Session not found' });
+      assertSessionOwnership(session, platformIdentity);
       if (session.state === 'RUN_LOST') return json(res, 200, { player: store.players[session.playerId], session });
       if (session.state !== 'WAVE_PLAYING') return json(res, 409, { error: `Run cannot be lost from ${session.state}` });
       const loseBody = { ...body, damageTaken: 3 };
@@ -766,8 +1001,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && abandonMatch) {
       const store = readStore(); const session = store.sessions[abandonMatch[1]];
       if (!session) return json(res, 404, { error: 'Session not found' });
+      assertSessionOwnership(session, platformIdentity);
       if (['RESULT', 'RUN_LOST', 'BOSS_COMPLETE'].includes(session.state)) return json(res, 409, { error: 'Session already finished' });
+      const refunded = await refundUnstartedSideSixRun(store, session, 'game_failed');
       session.state = 'RUN_LOST'; session.reward = 0; session.updatedAt = now();
+      if (refunded) session.cancelledBeforePlay = true;
       const player = store.players[session.playerId]; if (player?.activeSessionId === session.id) player.activeSessionId = null;
       transaction(store, { playerId: session.playerId, sessionId: session.id, type: 'ABANDON_SETTLEMENT', amount: 0, balanceAfter: player?.balance ?? 0, meta: { wave: session.wave, score: session.score } });
       recordTelemetry(store, { type: 'run_abandon', playerId: session.playerId, sessionId: session.id, wave: session.wave, difficulty: session.difficulty, data: { score: session.score } });
@@ -784,8 +1022,12 @@ const server = http.createServer(async (req, res) => {
     return json(res, 404, { error: 'Route not found' });
   } catch (error) {
     console.error(error);
-    const message = process.env.NODE_ENV === 'production' ? 'Internal server error' : (error.message || 'Internal server error');
-    return json(res, 500, { error: message });
+    const status = Number(error?.statusCode || error?.status || 500);
+    const safeStatus = Number.isInteger(status) && status >= 400 && status <= 599 ? status : 500;
+    const publicMessage = safeStatus >= 500 && process.env.NODE_ENV === 'production'
+      ? 'Internal server error'
+      : (error.message || 'Internal server error');
+    return json(res, safeStatus, { error: publicMessage, code: error?.code || 'REQUEST_FAILED' });
   }
 });
 
