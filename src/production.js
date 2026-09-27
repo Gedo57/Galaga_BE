@@ -1,14 +1,14 @@
 const SCORE_TYPES = ['fighter', 'diver', 'shooter', 'heavy', 'charger', 'elite', 'miniBoss', 'finalBoss'];
 
 export const BOSS_HP_BY_DIFFICULTY = Object.freeze({
-  easy: Object.freeze({ miniBoss: 75, finalBoss: 150 }),
-  medium: Object.freeze({ miniBoss: 110, finalBoss: 220 }),
-  hard: Object.freeze({ miniBoss: 160, finalBoss: 320 })
+  easy: Object.freeze({ miniBoss: 120, finalBoss: 250 }),
+  medium: Object.freeze({ miniBoss: 180, finalBoss: 360 }),
+  hard: Object.freeze({ miniBoss: 260, finalBoss: 520 })
 });
 
 export function bossHpForDifficulty(type, difficulty = 'medium') {
   const table = BOSS_HP_BY_DIFFICULTY[String(difficulty || '').toLowerCase()] || BOSS_HP_BY_DIFFICULTY.medium;
-  return Math.max(1, Number(table[type] || (type === 'miniBoss' ? 110 : 220)));
+  return Math.max(1, Number(table[type] || (type === 'miniBoss' ? 180 : 360)));
 }
 
 export const PHASE8_TARGETS = Object.freeze({
