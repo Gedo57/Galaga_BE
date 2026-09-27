@@ -5,12 +5,14 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { ensurePhase8Store, recordTelemetry, validateCoreSnapshot, applyValidationResult, buildTelemetrySummary, buildBalanceReport, PHASE8_TARGETS, bossHpForDifficulty } from './production.js';
 import { createSideSixClient } from './sidesix.js';
+import { createPlatformClient } from './platform.js';
 import { platformSessionStore } from './platformSessionStore.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STORE_PATH = process.env.STORE_PATH ? resolve(process.env.STORE_PATH) : join(__dirname, '..', 'data', 'store.json');
 const PORT = Number(process.env.PORT || 3001);
 const sideSix = createSideSixClient();
+const platform = createPlatformClient();
 const ENTRY_MIN = 50;
 const ENTRY_STEP = 50;
 const ENTRY_MAX = 1_000_000;
@@ -105,7 +107,7 @@ function writeStore(store) {
   renameSync(tempPath, STORE_PATH);
 }
 function jsonReplacer(key, value) {
-  if (key === 'sideSix' || key === 'authorizeTransactionId' || key === 'sessionTokenHash') return undefined;
+  if (['sideSix', 'platformWallet', 'authorizeTransactionId', 'holdId', 'sessionTokenHash'].includes(key)) return undefined;
   return value;
 }
 function json(res, status, payload) {
@@ -325,56 +327,115 @@ function buildSettlement(session, tier, mode) {
     mode, score: session.score, settledAt: now()
   };
 }
-function isExternalWalletSession(session) {
-  return Boolean(sideSix.configuration.enabled && session?.walletMode === 'SIDESIX' && session?.sideSix?.userId);
+function walletState(session) {
+  if (session?.walletMode === 'SIDESIX') return session.sideSix || null;
+  if (session?.walletMode === 'PLATFORM') return session.platformWallet || null;
+  return null;
 }
-async function settleSideSixPrize(store, session, cashout) {
+function isExternalWalletSession(session) {
+  return Boolean(['SIDESIX', 'PLATFORM'].includes(session?.walletMode) && walletState(session)?.userId);
+}
+async function settleExternalPrize(store, session, cashout) {
   if (!isExternalWalletSession(session)) return;
-  const wallet = session.sideSix;
+  const wallet = walletState(session);
   if (wallet.settlementStatus === 'settled') return;
-  const requestId = wallet.settleRequestId || sideSix.requestId('galaga', session.id, 'settle');
-  wallet.settleRequestId = requestId;
+
+  if (session.walletMode === 'SIDESIX') {
+    const requestId = wallet.settleRequestId || sideSix.requestId('galaga', session.id, 'settle');
+    wallet.settleRequestId = requestId;
+    wallet.settlementStatus = 'pending';
+    wallet.pendingPrize = cashout.reward;
+    wallet.pendingCashout = { ...cashout };
+    writeStore(store);
+    await sideSix.settle({
+      userId: wallet.userId,
+      wonPrizeValue: cashout.reward,
+      authorizeTransactionId: wallet.authorizeTransactionId,
+      requestId,
+      playId: 1,
+    });
+    wallet.settlementStatus = 'settled';
+    wallet.pendingPrize = null;
+    wallet.pendingCashout = null;
+    wallet.settledAt = now();
+    return;
+  }
+
+  const requestId = wallet.payoutRequestId || platform.requestId('galaga', session.id, 'payout');
+  wallet.payoutRequestId = requestId;
   wallet.settlementStatus = 'pending';
   wallet.pendingPrize = cashout.reward;
   wallet.pendingCashout = { ...cashout };
   writeStore(store);
-  await sideSix.settle({
+  await platform.payout({
     userId: wallet.userId,
-    wonPrizeValue: cashout.reward,
-    authorizeTransactionId: wallet.authorizeTransactionId,
-    requestId,
-    playId: 1,
+    matchId: wallet.matchId,
+    amount: cashout.reward,
+    currency: wallet.currency,
+    idempotencyKey: requestId,
+    reason: 'Galaga run payout',
+    metadata: { sessionId: session.id, wave: cashout.wave, difficulty: session.difficulty, multiplier: cashout.multiplier },
   });
   wallet.settlementStatus = 'settled';
   wallet.pendingPrize = null;
   wallet.pendingCashout = null;
   wallet.settledAt = now();
 }
-async function refundUnstartedSideSixRun(store, session, reason = 'game_failed') {
+async function cancelUnstartedExternalRun(store, session, reason = 'game_failed') {
   if (!isExternalWalletSession(session)) return false;
-  const wallet = session.sideSix;
-  if (wallet.playStarted || wallet.refundStatus === 'refunded') return false;
-  const requestId = wallet.refundRequestId || sideSix.requestId('galaga', session.id, 'refund');
-  wallet.refundRequestId = requestId;
-  wallet.refundStatus = 'pending';
-  writeStore(store);
-  await sideSix.refund({
-    userId: wallet.userId,
-    authorizeTransactionId: wallet.authorizeTransactionId,
-    requestId,
-    reason,
-  });
-  wallet.refundStatus = 'refunded';
-  wallet.refundedAt = now();
+  const wallet = walletState(session);
+  if (wallet.playStarted) return false;
+
+  if (session.walletMode === 'SIDESIX') {
+    if (wallet.refundStatus === 'refunded') return false;
+    const requestId = wallet.refundRequestId || sideSix.requestId('galaga', session.id, 'refund');
+    wallet.refundRequestId = requestId;
+    wallet.refundStatus = 'pending';
+    writeStore(store);
+    await sideSix.refund({ userId: wallet.userId, authorizeTransactionId: wallet.authorizeTransactionId, requestId, reason });
+    wallet.refundStatus = 'refunded';
+    wallet.refundedAt = now();
+    return true;
+  }
+
+  if (wallet.releasedAt || wallet.refundedAt) return false;
+  if (wallet.capturedAt) {
+    const requestId = wallet.refundRequestId || platform.requestId('galaga', session.id, 'refund');
+    wallet.refundRequestId = requestId;
+    writeStore(store);
+    await platform.refund({
+      userId: wallet.userId, matchId: wallet.matchId, holdId: wallet.holdId,
+      idempotencyKey: requestId, reason: 'Galaga run cancelled before play', metadata: { sessionId: session.id },
+    });
+    wallet.refundedAt = now();
+  } else {
+    const requestId = wallet.releaseRequestId || platform.requestId('galaga', session.id, 'release');
+    wallet.releaseRequestId = requestId;
+    writeStore(store);
+    await platform.release({
+      userId: wallet.userId, matchId: wallet.matchId, holdId: wallet.holdId,
+      idempotencyKey: requestId, metadata: { sessionId: session.id, reason },
+    });
+    wallet.releasedAt = now();
+  }
   return true;
+}
+async function refreshPlatformBalance(player) {
+  if (!player || player.walletMode !== 'PLATFORM' || !player.externalUserId) return player;
+  const snapshot = await platform.getBalance(player.externalUserId);
+  player.balance = Number(snapshot.available);
+  player.walletCurrency = snapshot.currency || player.walletCurrency || 'COIN';
+  player.updatedAt = now();
+  return player;
 }
 async function applySettlementCredit(store, session, cashout, transactionType) {
   const player = store.players[session.playerId];
   if (!player) throw new Error('Player not found');
   if (isExternalWalletSession(session)) {
-    await settleSideSixPrize(store, session, cashout);
-    player.balance = null;
-    player.walletMode = 'SIDESIX';
+    await settleExternalPrize(store, session, cashout);
+    if (session.walletMode === 'SIDESIX') player.balance = null;
+    else await refreshPlatformBalance(player);
+    player.walletMode = session.walletMode;
   } else {
     player.balance += cashout.reward;
   }
@@ -394,8 +455,9 @@ async function applySettlementCredit(store, session, cashout, transactionType) {
 async function settleCashout(store, session, mode = 'manual') {
   if (session.state === 'RESULT' && session.cashout) return { player: store.players[session.playerId], session };
   if (session.state !== 'CHECKPOINT') throw new Error(`Cashout cannot settle from ${session.state}`);
-  const pendingCashout = isExternalWalletSession(session) && session.sideSix?.settlementStatus === 'pending'
-    ? session.sideSix.pendingCashout
+  const wallet = walletState(session);
+  const pendingCashout = isExternalWalletSession(session) && wallet?.settlementStatus === 'pending'
+    ? wallet.pendingCashout
     : null;
   const tier = unlockedTier(session);
   const cashout = pendingCashout || buildSettlement(session, tier, mode);
@@ -408,8 +470,9 @@ async function settleCashout(store, session, mode = 'manual') {
 }
 async function settleBossCompletion(store, session) {
   if (session.state === 'BOSS_COMPLETE' && session.cashout) return { player: store.players[session.playerId], session };
-  const pendingCashout = isExternalWalletSession(session) && session.sideSix?.settlementStatus === 'pending'
-    ? session.sideSix.pendingCashout
+  const wallet = walletState(session);
+  const pendingCashout = isExternalWalletSession(session) && wallet?.settlementStatus === 'pending'
+    ? wallet.pendingCashout
     : null;
   const tier = unlockedTier(session);
   const cashout = pendingCashout || buildSettlement(session, tier, 'boss_complete');
@@ -451,21 +514,22 @@ function normalizePlayerId(value) {
   return PLAYER_ID_PATTERN.test(playerId) ? playerId : null;
 }
 function playerIdForIdentity(identity, requestedPlayerId) {
-  if (sideSix.configuration.enabled) {
-    if (!identity?.userId) return null;
-    return `player-sidesix-${identity.userId}`;
-  }
+  if (identity?.provider === 'SIDESIX' && identity?.userId) return `player-sidesix-${identity.userId}`;
+  if (identity?.provider === 'PLATFORM' && identity?.userId) return `player-platform-${identity.userId}`;
   return normalizePlayerId(requestedPlayerId);
 }
 function ensurePlayer(store, requestedPlayerId, identity = null) {
   const playerId = playerIdForIdentity(identity, requestedPlayerId);
   if (!playerId) return null;
+  const provider = ['SIDESIX', 'PLATFORM'].includes(identity?.provider) ? identity.provider : 'LOCAL';
   if (!store.players[playerId]) {
     store.players[playerId] = {
       id: playerId,
       displayName: identity?.userName || 'STARBLAST',
-      balance: sideSix.configuration.enabled ? null : DEFAULT_PLAYER_BALANCE,
-      walletMode: sideSix.configuration.enabled ? 'SIDESIX' : 'LOCAL',
+      balance: provider === 'SIDESIX' ? null : provider === 'PLATFORM' ? Number(identity?.balance ?? 0) : DEFAULT_PLAYER_BALANCE,
+      walletMode: provider,
+      externalUserId: provider === 'LOCAL' ? null : String(identity.userId),
+      walletCurrency: identity?.currency || (provider === 'PLATFORM' ? 'COIN' : provider === 'SIDESIX' ? sideSix.configuration.currency : 'COINS'),
       activeSessionId: null,
       createdAt: now(),
       updatedAt: now()
@@ -473,10 +537,13 @@ function ensurePlayer(store, requestedPlayerId, identity = null) {
     return { player: store.players[playerId], created: true };
   }
   const player = store.players[playerId];
-  if (sideSix.configuration.enabled) {
+  if (provider !== 'LOCAL') {
     player.displayName = identity?.userName || player.displayName || 'PLAYER';
-    player.balance = null;
-    player.walletMode = 'SIDESIX';
+    player.walletMode = provider;
+    player.externalUserId = String(identity.userId);
+    player.walletCurrency = identity?.currency || player.walletCurrency;
+    if (provider === 'SIDESIX') player.balance = null;
+    else if (Number.isFinite(Number(identity?.balance))) player.balance = Number(identity.balance);
   }
   return { player, created: false };
 }
@@ -493,28 +560,30 @@ function bearerToken(req) {
   return match ? match[1] : '';
 }
 function requirePlatformIdentity(req) {
-  if (!sideSix.configuration.enabled) return null;
   const token = bearerToken(req);
-  const session = token ? platformSessionStore.get(token) : null;
-  if (!session?.userId) {
-    const error = new Error('Valid SideSix launch session required');
+  if (!token) return null;
+  const session = platformSessionStore.get(token);
+  if (!session?.userId || !['SIDESIX', 'PLATFORM'].includes(session.provider)) {
+    const error = new Error('Valid external wallet launch session required');
     error.status = 401;
     error.statusCode = 401;
-    error.code = 'SIDESIX_SESSION_REQUIRED';
+    error.code = 'WALLET_SESSION_REQUIRED';
     throw error;
   }
   return session;
 }
 function assertSessionOwnership(session, identity) {
-  if (!sideSix.configuration.enabled) return;
-  const ownerUserId = String(session?.sideSix?.userId || '');
-  const requestUserId = String(identity?.userId || '');
-  if (!ownerUserId || !requestUserId || ownerUserId !== requestUserId) {
-    const error = new Error('Session does not belong to the SideSix player');
-    error.status = 403;
-    error.statusCode = 403;
-    error.code = 'SIDESIX_SESSION_MISMATCH';
-    throw error;
+  const provider = session?.walletMode || 'LOCAL';
+  if (provider === 'LOCAL') {
+    if (identity) {
+      const error = new Error('Wallet provider mismatch'); error.status = error.statusCode = 403; error.code = 'WALLET_SESSION_MISMATCH'; throw error;
+    }
+    return;
+  }
+  const wallet = walletState(session);
+  if (!identity || identity.provider !== provider || String(wallet?.userId || '') !== String(identity.userId || '')) {
+    const error = new Error('Session does not belong to this wallet player');
+    error.status = 403; error.statusCode = 403; error.code = 'WALLET_SESSION_MISMATCH'; throw error;
   }
 }
 
@@ -602,20 +671,37 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && path === '/') return json(res, 200, { ok: true, service: 'galaga-skill-wager-be', version: '0.8.1', health: '/api/health' });
     if (req.method === 'GET' && path === '/api/health') return json(res, 200, { ok: true, service: 'galaga-skill-wager-be', phase: 8, version: '0.8.1', waves: 10, antiCheatMode: String(process.env.ANTI_CHEAT_MODE || 'enforce'), storeSchema: 8 });
     if (req.method === 'POST' && path === '/api/platform/launch') {
-      if (!sideSix.configuration.enabled) return json(res, 200, { ok: true, mode: 'LOCAL', token: null, identity: null });
       const body = await readBody(req);
-      const identity = sideSix.verifyLaunch(body);
-      const platform = platformSessionStore.create(identity);
-      return json(res, 201, {
-        ok: true,
-        mode: 'SIDESIX',
-        token: platform.token,
-        identity: {
-          userId: identity.userId,
-          userName: identity.userName,
-          returnUrl: identity.returnUrl,
-          currency: sideSix.configuration.currency
+      let identity = null;
+      if (body?.platformLaunchToken) {
+        if (!platform.configuration.enabled) {
+          const error = new Error('Platform wallet integration is disabled'); error.status = error.statusCode = 503; error.code = 'PLATFORM_NOT_CONFIGURED'; throw error;
         }
+        const consumed = await platform.consumeLaunch({ launchToken: String(body.platformLaunchToken), exchangeId: String(body.exchangeId || randomUUID()) });
+        identity = {
+          provider: 'PLATFORM',
+          userId: String(consumed.user.publicId),
+          userName: String(consumed.user.displayName || 'Player'),
+          avatarUrl: consumed.user.avatarUrl || null,
+          locale: consumed.user.locale || null,
+          returnUrl: null,
+          currency: String(consumed.wallet.currency || 'COIN'),
+          balance: Number(consumed.wallet.available || 0),
+          launchId: consumed.launch.launchId,
+        };
+      } else if (body?.userId || body?.sig) {
+        if (!sideSix.configuration.enabled) {
+          const error = new Error('SideSix wallet integration is disabled'); error.status = error.statusCode = 503; error.code = 'SIDESIX_DISABLED'; throw error;
+        }
+        const verified = sideSix.verifyLaunch(body);
+        identity = { ...verified, provider: 'SIDESIX', currency: sideSix.configuration.currency, balance: null };
+      } else {
+        return json(res, 200, { ok: true, mode: 'LOCAL', token: null, identity: null });
+      }
+      const gameSession = platformSessionStore.create(identity);
+      return json(res, 201, {
+        ok: true, mode: identity.provider, token: gameSession.token,
+        identity: { userId: identity.userId, userName: identity.userName, returnUrl: identity.returnUrl || null, currency: identity.currency, balance: identity.balance }
       });
     }
 
@@ -648,7 +734,8 @@ const server = http.createServer(async (req, res) => {
       const store = readStore();
       const ensured = ensurePlayer(store, body.playerId, platformIdentity);
       if (!ensured) return json(res, 400, { error: 'Invalid player ID' });
-      if (ensured.created) writeStore(store);
+      if (platformIdentity?.provider === 'PLATFORM') await refreshPlatformBalance(ensured.player);
+      if (ensured.created || platformIdentity?.provider === 'PLATFORM') writeStore(store);
       const active = ensured.player.activeSessionId ? store.sessions[ensured.player.activeSessionId] : null;
       if (await autoSettleExpiredCheckpoint(store, active)) writeStore(store);
       return json(res, ensured.created ? 201 : 200, getPlayerPayload(store, ensured.player.id));
@@ -664,6 +751,7 @@ const server = http.createServer(async (req, res) => {
       if (!player) return json(res, 404, { error: 'Player not found' });
       const active = player.activeSessionId ? store.sessions[player.activeSessionId] : null;
       if (await autoSettleExpiredCheckpoint(store, active)) writeStore(store);
+      if (platformIdentity?.provider === 'PLATFORM') { await refreshPlatformBalance(player); writeStore(store); }
       return json(res, 200, getPlayerPayload(store, playerId));
     }
 
@@ -676,18 +764,23 @@ const server = http.createServer(async (req, res) => {
       if (!validEntryAmount(entryAmount)) return json(res, 400, { error: `Invalid entry amount. Use ${ENTRY_STEP}-coin steps from ${ENTRY_MIN}.` });
       if (!ALLOWED_DIFFICULTIES.has(difficulty)) return json(res, 400, { error: 'Invalid difficulty' });
 
+      const provider = platformIdentity?.provider || 'LOCAL';
       const store = readStore();
       const ensured = ensurePlayer(store, playerId, platformIdentity);
       const player = ensured.player;
       let session = player.activeSessionId ? store.sessions[player.activeSessionId] : null;
 
       if (session && !['RESULT', 'RUN_LOST', 'BOSS_COMPLETE'].includes(session.state)) {
+        assertSessionOwnership(session, platformIdentity);
         const sameRunRequest = Number(session.entryAmount) === entryAmount && session.difficulty === difficulty;
-        if (sideSix.configuration.enabled && sameRunRequest && session.state === 'ENTRY_PAID' && session.sideSix?.authorizeTransactionId) {
+        const resumable = sameRunRequest && (
+          (provider === 'SIDESIX' && ['AUTHORIZING', 'ENTRY_PAID'].includes(session.state)) ||
+          (provider === 'PLATFORM' && ['RESERVING', 'ENTRY_PAID'].includes(session.state))
+        );
+        if (!resumable) return json(res, 409, { error: 'Player already has an active run', activeSession: session });
+        if (session.state === 'ENTRY_PAID') {
+          if (provider === 'PLATFORM') await refreshPlatformBalance(player);
           return json(res, 200, { player, session });
-        }
-        if (!(sideSix.configuration.enabled && sameRunRequest && session.state === 'AUTHORIZING')) {
-          return json(res, 409, { error: 'Player already has an active run', activeSession: session });
         }
       } else if (session) {
         player.activeSessionId = null;
@@ -697,92 +790,82 @@ const server = http.createServer(async (req, res) => {
       if (!session) {
         const sessionId = randomUUID();
         const created = now();
+        const matchId = `galaga:${sessionId}`;
         session = {
-          id: sessionId,
-          playerId,
-          entryAmount,
-          difficulty,
-          state: sideSix.configuration.enabled ? 'AUTHORIZING' : 'ENTRY_PAID',
-          walletMode: sideSix.configuration.enabled ? 'SIDESIX' : 'LOCAL',
-          sideSix: sideSix.configuration.enabled ? {
-            userId: platformIdentity.userId,
-            authorizeTransactionId: null,
+          id: sessionId, playerId, entryAmount, difficulty,
+          state: provider === 'SIDESIX' ? 'AUTHORIZING' : provider === 'PLATFORM' ? 'RESERVING' : 'ENTRY_PAID',
+          walletMode: provider,
+          sideSix: provider === 'SIDESIX' ? {
+            userId: platformIdentity.userId, authorizeTransactionId: null,
             authorizeRequestId: sideSix.requestId('galaga', sessionId, 'authorize'),
-            playStarted: false,
-            settlementStatus: 'authorizing',
-            refundStatus: null,
+            playStarted: false, settlementStatus: 'authorizing', refundStatus: null,
           } : null,
-          score: 0,
-          lives: 3,
-          reward: 0,
-          gameSeed: randomUUID(),
-          coreState: defaultCore(),
-          waveState: { startCore: null, startedAt: null, lastResult: null },
-          completedWaves: [],
-          checkpoint: null,
-          checkpointHistory: [],
-          cashout: null,
-          bossComplete: null,
-          antiCheat: { riskScore: 0, flags: [], rejectedSnapshots: 0, reviewRequired: false },
-          clientVersion: String(req.headers['x-client-version'] || 'unknown').slice(0, 32),
-          createdAt: created,
-          updatedAt: created,
+          platformWallet: provider === 'PLATFORM' ? {
+            userId: platformIdentity.userId, currency: platformIdentity.currency || 'COIN', matchId, holdId: null,
+            reserveRequestId: platform.requestId('galaga', sessionId, 'reserve'),
+            captureRequestId: platform.requestId('galaga', sessionId, 'capture'),
+            playStarted: false, settlementStatus: 'reserving',
+          } : null,
+          score: 0, lives: 3, reward: 0, gameSeed: randomUUID(), coreState: defaultCore(),
+          waveState: { startCore: null, startedAt: null, lastResult: null }, completedWaves: [], checkpoint: null, checkpointHistory: [],
+          cashout: null, bossComplete: null, antiCheat: { riskScore: 0, flags: [], rejectedSnapshots: 0, reviewRequired: false },
+          clientVersion: String(req.headers['x-client-version'] || 'unknown').slice(0, 32), createdAt: created, updatedAt: created,
         };
 
-        if (!sideSix.configuration.enabled) {
+        if (provider === 'LOCAL') {
           if (player.balance < entryAmount) return json(res, 409, { error: 'Insufficient coin balance' });
           player.balance -= entryAmount;
-        } else {
+        } else if (provider === 'SIDESIX') {
           player.balance = null;
-          player.walletMode = 'SIDESIX';
         }
-
+        player.walletMode = provider;
         store.sessions[session.id] = session;
         player.activeSessionId = session.id;
         player.updatedAt = now();
         writeStore(store);
       }
 
-      if (sideSix.configuration.enabled && session.state === 'AUTHORIZING') {
+      if (provider === 'SIDESIX' && session.state === 'AUTHORIZING') {
         try {
-          const authorized = await sideSix.authorize({
-            userId: session.sideSix.userId,
-            playCost: session.entryAmount,
-            requestId: session.sideSix.authorizeRequestId,
-          });
+          const authorized = await sideSix.authorize({ userId: session.sideSix.userId, playCost: session.entryAmount, requestId: session.sideSix.authorizeRequestId });
           session.sideSix.authorizeTransactionId = authorized.transactionId;
           session.sideSix.settlementStatus = 'authorized';
           session.sideSix.authorizedAt = now();
-          session.state = 'ENTRY_PAID';
-          session.updatedAt = now();
+          session.state = 'ENTRY_PAID'; session.updatedAt = now();
         } catch (error) {
           if (error?.code === 'INSUFFICIENT_BALANCE') {
             if (player.activeSessionId === session.id) player.activeSessionId = null;
-            delete store.sessions[session.id];
-            writeStore(store);
+            delete store.sessions[session.id]; writeStore(store);
+          }
+          throw error;
+        }
+      }
+
+      if (provider === 'PLATFORM' && session.state === 'RESERVING') {
+        try {
+          const w = session.platformWallet;
+          const reserved = await platform.reserve({
+            userId: w.userId, matchId: w.matchId, amount: session.entryAmount, currency: w.currency, idempotencyKey: w.reserveRequestId,
+            metadata: { game: 'galaga', sessionId: session.id, difficulty: session.difficulty },
+          });
+          const holdId = reserved?.hold?.holdId || reserved?.holdId;
+          if (!holdId) { const error = new Error('Platform reserve response did not include holdId'); error.code = 'PLATFORM_RESERVE_INVALID'; error.status = error.statusCode = 503; throw error; }
+          w.holdId = holdId; w.reservedAt = now(); w.settlementStatus = 'reserved';
+          session.state = 'ENTRY_PAID'; session.updatedAt = now();
+          await refreshPlatformBalance(player);
+        } catch (error) {
+          if (['INSUFFICIENT_BALANCE', 'WALLET_INSUFFICIENT_FUNDS'].includes(error?.code)) {
+            if (player.activeSessionId === session.id) player.activeSessionId = null;
+            delete store.sessions[session.id]; writeStore(store);
           }
           throw error;
         }
       }
 
       if (!session.entryTransactionId) {
-        const debit = transaction(store, {
-          playerId,
-          sessionId: session.id,
-          type: 'ENTRY_DEBIT',
-          amount: -entryAmount,
-          balanceAfter: player.balance,
-          meta: { difficulty, walletMode: session.walletMode },
-        });
+        const debit = transaction(store, { playerId, sessionId: session.id, type: provider === 'PLATFORM' ? 'PLATFORM_RESERVE' : provider === 'SIDESIX' ? 'SIDESIX_AUTHORIZE' : 'ENTRY_DEBIT', amount: -entryAmount, balanceAfter: player.balance, meta: { difficulty, walletMode: session.walletMode } });
         session.entryTransactionId = debit.id;
-        recordTelemetry(store, {
-          type: 'session_start',
-          playerId,
-          sessionId: session.id,
-          wave: 1,
-          difficulty,
-          data: { entryAmount, clientVersion: session.clientVersion, walletMode: session.walletMode },
-        });
+        recordTelemetry(store, { type: 'session_start', playerId, sessionId: session.id, wave: 1, difficulty, data: { entryAmount, clientVersion: session.clientVersion, walletMode: session.walletMode } });
       }
       writeStore(store);
       return json(res, 201, { player, session });
@@ -795,7 +878,9 @@ const server = http.createServer(async (req, res) => {
       if (!session) return json(res, 404, { error: 'Session not found' });
       assertSessionOwnership(session, platformIdentity);
       if (await autoSettleExpiredCheckpoint(store, session)) writeStore(store);
-      return json(res, 200, { session, player: store.players[session.playerId] });
+      const sessionPlayer = store.players[session.playerId];
+      if (session.walletMode === 'PLATFORM' && sessionPlayer) { await refreshPlatformBalance(sessionPlayer); writeStore(store); }
+      return json(res, 200, { session, player: sessionPlayer });
     }
 
     const countdownMatch = path.match(/^\/api\/sessions\/([^/]+)\/countdown$/);
@@ -813,10 +898,25 @@ const server = http.createServer(async (req, res) => {
       if (!session) return json(res, 404, { error: 'Session not found' });
       assertSessionOwnership(session, platformIdentity);
       if (!['COUNTDOWN', 'ENTRY_PAID'].includes(session.state)) return json(res, 409, { error: `Invalid session transition: ${session.state} -> WAVE_PLAYING` });
+      if (session.walletMode === 'PLATFORM') {
+        const wallet = session.platformWallet;
+        if (!wallet?.holdId) return json(res, 409, { error: 'Platform wallet reservation is missing' });
+        if (!wallet.capturedAt) {
+          await platform.capture({
+            userId: wallet.userId, matchId: wallet.matchId, holdId: wallet.holdId, idempotencyKey: wallet.captureRequestId,
+            metadata: { game: 'galaga', sessionId: session.id, difficulty: session.difficulty },
+          });
+          wallet.capturedAt = now();
+        }
+        wallet.playStarted = true;
+        const player = store.players[session.playerId];
+        if (player) await refreshPlatformBalance(player);
+      } else if (session.walletMode === 'SIDESIX') {
+        session.sideSix.playStarted = true;
+      }
       session.state = 'WAVE_PLAYING'; session.waveState = { startCore: coreStart(session), startedAt: now(), lastResult: null };
-      if (isExternalWalletSession(session)) session.sideSix.playStarted = true;
       session.coreState.waveElapsed = 0; session.coreState.enemiesRemaining = WAVE[session.wave]?.enemies || 0;
-      session.updatedAt = now(); recordTelemetry(store, { type: 'wave_begin', playerId: session.playerId, sessionId: session.id, wave: session.wave, difficulty: session.difficulty }); writeStore(store); return json(res, 200, { session });
+      session.updatedAt = now(); recordTelemetry(store, { type: 'wave_begin', playerId: session.playerId, sessionId: session.id, wave: session.wave, difficulty: session.difficulty }); writeStore(store); return json(res, 200, { session, player: store.players[session.playerId] });
     }
 
     const coreMatch = path.match(/^\/api\/sessions\/([^/]+)\/core-state$/);
@@ -835,10 +935,11 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req); const store = readStore(); const session = store.sessions[clearMatch[1]];
       if (!session) return json(res, 404, { error: 'Session not found' });
       assertSessionOwnership(session, platformIdentity);
+      const recoveryWallet = walletState(session);
       if (
         isExternalWalletSession(session)
-        && session.sideSix?.settlementStatus === 'pending'
-        && session.sideSix?.pendingCashout?.mode === 'boss_complete'
+        && recoveryWallet?.settlementStatus === 'pending'
+        && recoveryWallet?.pendingCashout?.mode === 'boss_complete'
       ) {
         const settled = await settleBossCompletion(store, session);
         writeStore(store);
@@ -1003,10 +1104,11 @@ const server = http.createServer(async (req, res) => {
       if (!session) return json(res, 404, { error: 'Session not found' });
       assertSessionOwnership(session, platformIdentity);
       if (['RESULT', 'RUN_LOST', 'BOSS_COMPLETE'].includes(session.state)) return json(res, 409, { error: 'Session already finished' });
-      const refunded = await refundUnstartedSideSixRun(store, session, 'game_failed');
+      const refunded = await cancelUnstartedExternalRun(store, session, 'game_failed');
       session.state = 'RUN_LOST'; session.reward = 0; session.updatedAt = now();
       if (refunded) session.cancelledBeforePlay = true;
       const player = store.players[session.playerId]; if (player?.activeSessionId === session.id) player.activeSessionId = null;
+      if (session.walletMode === 'PLATFORM' && player) await refreshPlatformBalance(player);
       transaction(store, { playerId: session.playerId, sessionId: session.id, type: 'ABANDON_SETTLEMENT', amount: 0, balanceAfter: player?.balance ?? 0, meta: { wave: session.wave, score: session.score } });
       recordTelemetry(store, { type: 'run_abandon', playerId: session.playerId, sessionId: session.id, wave: session.wave, difficulty: session.difficulty, data: { score: session.score } });
       writeStore(store); return json(res, 200, { player, session });
