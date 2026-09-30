@@ -1037,9 +1037,22 @@ const server = http.createServer(async (req, res) => {
       const store = readStore(); const session = store.sessions[nextMatch[1]];
       if (!session) return json(res, 404, { error: 'Session not found' });
       assertSessionOwnership(session, platformIdentity);
+
+      // Idempotent transition: if the first POST committed but its HTTP response
+      // was lost, a retry observes the already-started wave instead of returning
+      // a 409 that can strand the client on the clear screen. This never advances
+      // a WAVE_PLAYING session again, so duplicate requests cannot skip waves.
+      if (session.state === 'WAVE_PLAYING') {
+        return json(res, 200, { session, advanced: false, idempotent: true });
+      }
       if (session.state !== 'WAVE_CLEAR') return json(res, 409, { error: `Automatic wave advance cannot run from ${session.state}` });
       if (session.wave >= 10) return json(res, 409, { error: 'Final Boss is the last wave' });
-      startNextWave(session); recordTelemetry(store, { type: 'wave_begin', playerId: session.playerId, sessionId: session.id, wave: session.wave, difficulty: session.difficulty }); writeStore(store); return json(res, 200, { session });
+
+      const fromWave = session.wave;
+      startNextWave(session);
+      recordTelemetry(store, { type: 'wave_begin', playerId: session.playerId, sessionId: session.id, wave: session.wave, difficulty: session.difficulty });
+      writeStore(store);
+      return json(res, 200, { session, advanced: true, fromWave, toWave: session.wave });
     }
 
     const decisionMatch = path.match(/^\/api\/sessions\/([^/]+)\/checkpoint-decision$/);
