@@ -188,8 +188,8 @@ function defaultCore() {
     patternActivations: Object.fromEntries([...ALLOWED_PATTERNS].map((id) => [id, 0])),
     lastPattern: '', comboIndex: 0, comboMultiplier: 1, comboTimer: 0,
     overdriveEnergy: 0, overdriveActiveRemaining: 0, bombUsed: false, bombAvailable: true,
-    waveElapsed: 0, enemiesRemaining: WAVE[1].enemies,
-    miniBossHp: 0, miniBossMaxHp: 0, finalBossHp: 0, finalBossMaxHp: 0, finalBossPhase: 0
+    waveElapsed: 0, enemiesRemaining: WAVE[1].enemies, lastStandActive: false, recoveryTimer: 0,
+    miniBossHp: 0, miniBossMaxHp: 0, miniBossPhase: 0, finalBossHp: 0, finalBossMaxHp: 0, finalBossPhase: 0
   };
 }
 function applyCoreSnapshot(session, body) {
@@ -243,6 +243,8 @@ function applyCoreSnapshot(session, body) {
   const requestedScore = Math.max(session.score || 0, nonNegativeInt(body.score, session.score || 0, 10_000_000));
   const score = Math.min(requestedScore, Math.max(session.score || 0, maxCombatScore));
 
+  const miniBossHpCap = bossHpForDifficulty('miniBoss', session.difficulty);
+  const finalBossHpCap = bossHpForDifficulty('finalBoss', session.difficulty);
   session.coreState = {
     kills, shotsFired, shotsHit, damageTaken, killsByType, bombKillsByType, dangerKillsByType,
     patternActivations, lastPattern, comboIndex, comboMultiplier,
@@ -252,10 +254,13 @@ function applyCoreSnapshot(session, body) {
     bombUsed, bombAvailable: !bombUsed,
     waveElapsed: finiteNumber(body.waveElapsed, previous.waveElapsed || 0, 0, 240),
     enemiesRemaining: nonNegativeInt(body.enemiesRemaining, previous.enemiesRemaining || 0, 100),
-    miniBossHp: nonNegativeInt(body.miniBossHp, previous.miniBossHp || 0, 400),
-    miniBossMaxHp: nonNegativeInt(body.miniBossMaxHp, previous.miniBossMaxHp || 0, 400),
-    finalBossHp: nonNegativeInt(body.finalBossHp, previous.finalBossHp || 0, 500),
-    finalBossMaxHp: nonNegativeInt(body.finalBossMaxHp, previous.finalBossMaxHp || 0, 500),
+    lastStandActive: Boolean(body.lastStandActive ?? previous.lastStandActive),
+    recoveryTimer: finiteNumber(body.recoveryTimer, previous.recoveryTimer || 0, 0, 5),
+    miniBossHp: nonNegativeInt(body.miniBossHp, previous.miniBossHp || 0, miniBossHpCap),
+    miniBossMaxHp: nonNegativeInt(body.miniBossMaxHp, previous.miniBossMaxHp || 0, miniBossHpCap),
+    miniBossPhase: nonNegativeInt(body.miniBossPhase, previous.miniBossPhase || 0, 3),
+    finalBossHp: nonNegativeInt(body.finalBossHp, previous.finalBossHp || 0, finalBossHpCap),
+    finalBossMaxHp: nonNegativeInt(body.finalBossMaxHp, previous.finalBossMaxHp || 0, finalBossHpCap),
     finalBossPhase: nonNegativeInt(body.finalBossPhase, previous.finalBossPhase || 0, 3)
   };
   session.score = score;
@@ -500,10 +505,13 @@ function startNextWave(session) {
   session.waveState = { startCore: coreStart(session), startedAt: now(), lastResult: null };
   session.coreState.waveElapsed = 0;
   session.coreState.enemiesRemaining = WAVE[session.wave]?.enemies || 0;
+  session.coreState.lastStandActive = false;
+  session.coreState.recoveryTimer = 0;
   const miniBossHp = bossHpForDifficulty('miniBoss', session.difficulty);
   const finalBossHp = bossHpForDifficulty('finalBoss', session.difficulty);
   session.coreState.miniBossHp = session.wave === 5 ? miniBossHp : 0;
   session.coreState.miniBossMaxHp = session.wave === 5 ? miniBossHp : 0;
+  session.coreState.miniBossPhase = session.wave === 5 ? 1 : 0;
   session.coreState.finalBossHp = session.wave === 10 ? finalBossHp : 0;
   session.coreState.finalBossMaxHp = session.wave === 10 ? finalBossHp : 0;
   session.coreState.finalBossPhase = session.wave === 10 ? 1 : 0;
