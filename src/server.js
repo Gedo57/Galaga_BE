@@ -97,7 +97,9 @@ function ensureStoreFile() {
 function readStore() {
   ensureStoreFile();
   const store = JSON.parse(readFileSync(STORE_PATH, 'utf8'));
-  return ensurePhase8Store(store);
+  const normalized = ensurePhase8Store(store);
+  normalizeSessionProgress(normalized);
+  return normalized;
 }
 function writeStore(store) {
   ensureStoreFile();
@@ -191,6 +193,26 @@ function defaultCore() {
     waveElapsed: 0, enemiesRemaining: WAVE[1].enemies, lastStandActive: false, recoveryTimer: 0,
     miniBossHp: 0, miniBossMaxHp: 0, miniBossPhase: 0, finalBossHp: 0, finalBossMaxHp: 0, finalBossPhase: 0
   };
+}
+
+function normalizeSessionProgress(store) {
+  for (const session of Object.values(store?.sessions || {})) {
+    if (!session || typeof session !== 'object') continue;
+    const currentWave = Number(session.wave);
+    if (Number.isInteger(currentWave) && currentWave >= 1 && currentWave <= 10) continue;
+
+    const completedWaves = Array.isArray(session.completedWaves) ? session.completedWaves : [];
+    const highestCompletedWave = completedWaves.reduce((highest, row) => {
+      const wave = Number(row?.wave);
+      return Number.isInteger(wave) && wave >= 1 && wave <= 10 ? Math.max(highest, wave) : highest;
+    }, 0);
+
+    // Compatibility repair for sessions created by builds that omitted session.wave.
+    // A fresh/in-progress legacy run is Wave 1; a progressed run resumes after its
+    // highest completed wave. This prevents permanent `Wave mismatch` loops.
+    session.wave = Math.min(10, Math.max(1, highestCompletedWave + 1));
+  }
+  return store;
 }
 function applyCoreSnapshot(session, body) {
   const previous = { ...defaultCore(), ...(session.coreState || {}) };
@@ -814,7 +836,7 @@ const server = http.createServer(async (req, res) => {
             captureRequestId: platform.requestId('galaga', sessionId, 'capture'),
             playStarted: false, settlementStatus: 'reserving',
           } : null,
-          score: 0, lives: 3, reward: 0, gameSeed: randomUUID(), coreState: defaultCore(),
+          wave: 1, score: 0, lives: 3, reward: 0, gameSeed: randomUUID(), coreState: defaultCore(),
           waveState: { startCore: null, startedAt: null, lastResult: null }, completedWaves: [], checkpoint: null, checkpointHistory: [],
           cashout: null, bossComplete: null, antiCheat: { riskScore: 0, flags: [], rejectedSnapshots: 0, reviewRequired: false },
           clientVersion: String(req.headers['x-client-version'] || 'unknown').slice(0, 32), createdAt: created, updatedAt: created,
