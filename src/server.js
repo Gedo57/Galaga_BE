@@ -41,7 +41,9 @@ const DIFFICULTY_ECONOMY = Object.freeze({
     checkpointMultipliers: Object.freeze({ 3: 4.80, 5: 5.80, 7: 7.00, 9: 8.50, 10: 10.00 })
   })
 });
-const CASHOUT_WAVES = Object.freeze([3, 5, 7, 9, 10]);
+const REWARD_TIER_WAVES = Object.freeze([3, 5, 7, 9, 10]);
+const CHECKPOINT_WAVES = Object.freeze([5, 9]);
+const PAYOUT_OPPORTUNITY_WAVES = Object.freeze([5, 9, 10]);
 function economyForDifficulty(difficulty = 'medium') {
   return DIFFICULTY_ECONOMY[String(difficulty || '').toLowerCase()] || DIFFICULTY_ECONOMY.medium;
 }
@@ -64,22 +66,36 @@ const DECISION_SECONDS = 8;
 const WAVE = Object.freeze({
   1: { enemies: 12, checkpoint: false },
   2: { enemies: 16, checkpoint: false },
-  3: { enemies: 18, checkpoint: true, scoreGate: 18000, multiplier: 2.75 },
+  3: { enemies: 18, checkpoint: false, scoreGate: 18000, multiplier: 2.75 },
   4: { enemies: 20, checkpoint: false },
   5: { enemies: 1, checkpoint: true, scoreGate: 42000, multiplier: 3.40 },
   6: { enemies: 20, checkpoint: false },
-  7: { enemies: 22, checkpoint: true, scoreGate: 75000, multiplier: 4.20 },
+  7: { enemies: 22, checkpoint: false, scoreGate: 75000, multiplier: 4.20 },
   8: { enemies: 25, checkpoint: false },
   9: { enemies: 22, checkpoint: true, scoreGate: 115000, multiplier: 5.20 },
   10: { enemies: 1, checkpoint: false, final: true, scoreGate: 150000, multiplier: 6.25 }
 });
-const CHECKPOINTS = Object.freeze(CASHOUT_WAVES.map((wave) => Object.freeze({
+const CHECKPOINTS = Object.freeze(CHECKPOINT_WAVES.map((wave) => Object.freeze({
   wave,
   scoreGate: scoreGateForDifficulty(wave, 'medium'),
   multiplier: checkpointMultiplierForDifficulty(wave, 'medium')
 })));
+function rewardTiersForDifficulty(difficulty = 'medium') {
+  return REWARD_TIER_WAVES.map((wave) => ({
+    wave,
+    scoreGate: scoreGateForDifficulty(wave, difficulty),
+    multiplier: checkpointMultiplierForDifficulty(wave, difficulty)
+  }));
+}
 function checkpointsForDifficulty(difficulty = 'medium') {
-  return CASHOUT_WAVES.map((wave) => ({
+  return CHECKPOINT_WAVES.map((wave) => ({
+    wave,
+    scoreGate: scoreGateForDifficulty(wave, difficulty),
+    multiplier: checkpointMultiplierForDifficulty(wave, difficulty)
+  }));
+}
+function payoutOpportunitiesForDifficulty(difficulty = 'medium') {
+  return PAYOUT_OPPORTUNITY_WAVES.map((wave) => ({
     wave,
     scoreGate: scoreGateForDifficulty(wave, difficulty),
     multiplier: checkpointMultiplierForDifficulty(wave, difficulty)
@@ -199,18 +215,27 @@ function normalizeSessionProgress(store) {
   for (const session of Object.values(store?.sessions || {})) {
     if (!session || typeof session !== 'object') continue;
     const currentWave = Number(session.wave);
-    if (Number.isInteger(currentWave) && currentWave >= 1 && currentWave <= 10) continue;
+    if (!Number.isInteger(currentWave) || currentWave < 1 || currentWave > 10) {
+      const completedWaves = Array.isArray(session.completedWaves) ? session.completedWaves : [];
+      const highestCompletedWave = completedWaves.reduce((highest, row) => {
+        const wave = Number(row?.wave);
+        return Number.isInteger(wave) && wave >= 1 && wave <= 10 ? Math.max(highest, wave) : highest;
+      }, 0);
 
-    const completedWaves = Array.isArray(session.completedWaves) ? session.completedWaves : [];
-    const highestCompletedWave = completedWaves.reduce((highest, row) => {
-      const wave = Number(row?.wave);
-      return Number.isInteger(wave) && wave >= 1 && wave <= 10 ? Math.max(highest, wave) : highest;
-    }, 0);
+      // Compatibility repair for sessions created by builds that omitted session.wave.
+      // A fresh/in-progress legacy run is Wave 1; a progressed run resumes after its
+      // highest completed wave. This prevents permanent `Wave mismatch` loops.
+      session.wave = Math.min(10, Math.max(1, highestCompletedWave + 1));
+    }
 
-    // Compatibility repair for sessions created by builds that omitted session.wave.
-    // A fresh/in-progress legacy run is Wave 1; a progressed run resumes after its
-    // highest completed wave. This prevents permanent `Wave mismatch` loops.
-    session.wave = Math.min(10, Math.max(1, highestCompletedWave + 1));
+    // Gameplay Contract Patch 1: old builds could leave a run waiting on a
+    // Wave 3/7 checkpoint. Those waves are reward tiers only now, so migrate the
+    // stale decision state to a normal clear state and let the client auto-advance.
+    if (session.state === 'CHECKPOINT' && !CHECKPOINT_WAVES.includes(Number(session.wave))) {
+      session.state = 'WAVE_CLEAR';
+      session.checkpoint = null;
+      session.updatedAt = now();
+    }
   }
   return store;
 }
@@ -306,18 +331,18 @@ function validEntryAmount(value) {
 }
 function unlockedTier(session) {
   let best = null;
-  for (const checkpoint of checkpointsForDifficulty(session.difficulty)) {
+  for (const checkpoint of rewardTiersForDifficulty(session.difficulty)) {
     if (checkpoint.wave > Number(session.wave || 0)) break;
     if (Number(session.score || 0) >= checkpoint.scoreGate) best = { ...checkpoint };
   }
   return best;
 }
-function nextTier(wave, difficulty = 'medium') {
-  return checkpointsForDifficulty(difficulty).find((cp) => cp.wave > Number(wave || 0)) || null;
+function nextPayoutOpportunity(wave, difficulty = 'medium') {
+  return payoutOpportunitiesForDifficulty(difficulty).find((cp) => cp.wave > Number(wave || 0)) || null;
 }
 function checkpointPayload(session, def) {
   const best = unlockedTier(session);
-  const next = nextTier(session.wave, session.difficulty);
+  const next = nextPayoutOpportunity(session.wave, session.difficulty);
   const startMultiplier = startMultiplierForDifficulty(session.difficulty);
   const currentMultiplier = best?.multiplier || startMultiplier;
   const scoreGate = scoreGateForDifficulty(session.wave, session.difficulty);
@@ -1179,4 +1204,4 @@ const server = http.createServer(async (req, res) => {
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) server.listen(PORT, '0.0.0.0', () => console.log(`Galaga Skill Wager BE listening on http://0.0.0.0:${PORT}`));
 
-export { server, readStore, writeStore, coreStart, defaultCore, WAVE, CHECKPOINTS, SCORE, DIFFICULTY_ECONOMY, economyForDifficulty, startMultiplierForDifficulty, scoreGateForDifficulty, checkpointMultiplierForDifficulty, comboMaxForDifficulty, checkpointsForDifficulty, checkpointPayload, buildSettlement, unlockedTier };
+export { server, readStore, writeStore, coreStart, defaultCore, WAVE, CHECKPOINTS, SCORE, DIFFICULTY_ECONOMY, economyForDifficulty, startMultiplierForDifficulty, scoreGateForDifficulty, checkpointMultiplierForDifficulty, comboMaxForDifficulty, rewardTiersForDifficulty, checkpointsForDifficulty, payoutOpportunitiesForDifficulty, checkpointPayload, buildSettlement, unlockedTier };
