@@ -126,7 +126,7 @@ function writeStore(store) {
   renameSync(tempPath, STORE_PATH);
 }
 function jsonReplacer(key, value) {
-  if (['sideSix', 'platformWallet', 'authorizeTransactionId', 'holdId', 'sessionTokenHash'].includes(key)) return undefined;
+  if (['sideSix', 'platformWallet', 'providerWallet', 'authorizeTransactionId', 'holdId', 'sessionTokenHash'].includes(key)) return undefined;
   return value;
 }
 function json(res, status, payload) {
