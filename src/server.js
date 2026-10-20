@@ -907,7 +907,7 @@ const server = http.createServer(async (req, res) => {
             playStarted: false, settlementStatus: 'authorizing', refundStatus: null,
           } : null,
           providerWallet: provider === 'PROVIDER' ? {
-            userId: platformIdentity.userId, partnerId: platformIdentity.partnerId, launchId: platformIdentity.launchId,
+            provider: 'PROVIDER', userId: platformIdentity.userId, partnerId: platformIdentity.partnerId, launchId: platformIdentity.launchId,
             currency: platformIdentity.currency, walletDecimals: platformIdentity.walletDecimals,
             betTransactionId: gameProvider.requestId('bet', platformIdentity.launchId, sessionId),
             playStarted: false, settlementStatus: 'authorizing', refundStatus: null,
