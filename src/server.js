@@ -1,11 +1,12 @@
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { ensurePhase8Store, recordTelemetry, validateCoreSnapshot, applyValidationResult, buildTelemetrySummary, buildBalanceReport, PHASE8_TARGETS, bossHpForDifficulty } from './production.js';
 import { createSideSixClient } from './sidesix.js';
 import { createPlatformClient } from './platform.js';
+import { gameProvider } from './game-provider.js';
 import { platformSessionStore } from './platformSessionStore.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -382,16 +383,31 @@ function buildSettlement(session, tier, mode) {
 function walletState(session) {
   if (session?.walletMode === 'SIDESIX') return session.sideSix || null;
   if (session?.walletMode === 'PLATFORM') return session.platformWallet || null;
+  if (session?.walletMode === 'PROVIDER') return session.providerWallet || null;
   return null;
 }
 function isExternalWalletSession(session) {
-  return Boolean(['SIDESIX', 'PLATFORM'].includes(session?.walletMode) && walletState(session)?.userId);
+  return Boolean(['SIDESIX', 'PLATFORM', 'PROVIDER'].includes(session?.walletMode) && walletState(session)?.userId);
 }
 async function settleExternalPrize(store, session, cashout) {
   if (!isExternalWalletSession(session)) return;
   const wallet = walletState(session);
   if (wallet.settlementStatus === 'settled') return;
 
+  if (session.walletMode === 'PROVIDER') {
+    const requestId = wallet.settleRequestId || gameProvider.requestId('win', wallet.launchId, session.id);
+    wallet.settleRequestId = requestId;
+    wallet.settlementStatus = 'pending';
+    wallet.pendingPrize = cashout.reward;
+    wallet.pendingCashout = { ...cashout };
+    writeStore(store);
+    await gameProvider.operation(wallet, 'win', { runId: session.id, amount: cashout.reward, transactionId: requestId, betTransactionId: wallet.betTransactionId });
+    wallet.settlementStatus = 'settled';
+    wallet.pendingPrize = null;
+    wallet.pendingCashout = null;
+    wallet.settledAt = now();
+    return;
+  }
   if (session.walletMode === 'SIDESIX') {
     const requestId = wallet.settleRequestId || sideSix.requestId('galaga', session.id, 'settle');
     wallet.settleRequestId = requestId;
@@ -438,6 +454,17 @@ async function cancelUnstartedExternalRun(store, session, reason = 'game_failed'
   const wallet = walletState(session);
   if (wallet.playStarted) return false;
 
+  if (session.walletMode === 'PROVIDER') {
+    if (wallet.refundedAt) return false;
+    if (!wallet.betTransactionId) throw Object.assign(new Error('Provider bet reference missing'), { statusCode: 503, code: 'PROVIDER_BET_MISSING' });
+    const requestId = wallet.refundRequestId || gameProvider.requestId('refund', wallet.launchId, session.id);
+    wallet.refundRequestId = requestId;
+    wallet.refundStatus = 'pending';
+    writeStore(store);
+    await gameProvider.operation(wallet, 'refund', { runId: session.id, amount: session.entryAmount, transactionId: requestId, betTransactionId: wallet.betTransactionId });
+    wallet.refundStatus = 'refunded'; wallet.refundedAt = now();
+    return true;
+  }
   if (session.walletMode === 'SIDESIX') {
     if (wallet.refundStatus === 'refunded') return false;
     const requestId = wallet.refundRequestId || sideSix.requestId('galaga', session.id, 'refund');
@@ -480,12 +507,21 @@ async function refreshPlatformBalance(player) {
   player.updatedAt = now();
   return player;
 }
+async function refreshProviderBalance(player) {
+  if (!player || player.walletMode !== 'PROVIDER' || !player.providerLaunchId) return player;
+  const snapshot = await gameProvider.getBalance({ provider: 'PROVIDER', launchId: player.providerLaunchId, currency: player.walletCurrency, walletDecimals: player.walletDecimals });
+  player.balance = Number(snapshot.available);
+  player.walletCurrency = snapshot.currency;
+  player.updatedAt = now();
+  return player;
+}
 async function applySettlementCredit(store, session, cashout, transactionType) {
   const player = store.players[session.playerId];
   if (!player) throw new Error('Player not found');
   if (isExternalWalletSession(session)) {
     await settleExternalPrize(store, session, cashout);
     if (session.walletMode === 'SIDESIX') player.balance = null;
+    else if (session.walletMode === 'PROVIDER') await refreshProviderBalance(player);
     else await refreshPlatformBalance(player);
     player.walletMode = session.walletMode;
   } else {
@@ -571,20 +607,26 @@ function normalizePlayerId(value) {
 function playerIdForIdentity(identity, requestedPlayerId) {
   if (identity?.provider === 'SIDESIX' && identity?.userId) return `player-sidesix-${identity.userId}`;
   if (identity?.provider === 'PLATFORM' && identity?.userId) return `player-platform-${identity.userId}`;
+  if (identity?.provider === 'PROVIDER' && identity?.userId && identity?.partnerId && identity?.launchId) {
+    const digest = createHash('sha256').update([identity.partnerId, identity.userId, identity.launchId].join('|')).digest('hex').slice(0,32);
+    return `player-provider-${digest}`;
+  }
   return normalizePlayerId(requestedPlayerId);
 }
 function ensurePlayer(store, requestedPlayerId, identity = null) {
   const playerId = playerIdForIdentity(identity, requestedPlayerId);
   if (!playerId) return null;
-  const provider = ['SIDESIX', 'PLATFORM'].includes(identity?.provider) ? identity.provider : 'LOCAL';
+  const provider = ['SIDESIX', 'PLATFORM', 'PROVIDER'].includes(identity?.provider) ? identity.provider : 'LOCAL';
+  if (provider === 'LOCAL' && store.players[playerId]?.walletMode && store.players[playerId]?.walletMode !== 'LOCAL') return null;
   if (!store.players[playerId]) {
     store.players[playerId] = {
       id: playerId,
       displayName: identity?.userName || 'STARBLAST',
-      balance: provider === 'SIDESIX' ? null : provider === 'PLATFORM' ? Number(identity?.balance ?? 0) : DEFAULT_PLAYER_BALANCE,
+      balance: provider === 'SIDESIX' ? null : provider === 'PLATFORM' ? Number(identity?.balance ?? 0) : provider === 'PROVIDER' ? 0 : DEFAULT_PLAYER_BALANCE,
       walletMode: provider,
       externalUserId: provider === 'LOCAL' ? null : String(identity.userId),
       walletCurrency: identity?.currency || (provider === 'PLATFORM' ? 'COIN' : provider === 'SIDESIX' ? sideSix.configuration.currency : 'COINS'),
+      ...(provider === 'PROVIDER' ? { providerLaunchId: identity.launchId, providerPartnerId: identity.partnerId, walletDecimals: identity.walletDecimals } : {}),
       activeSessionId: null,
       createdAt: now(),
       updatedAt: now()
@@ -597,6 +639,7 @@ function ensurePlayer(store, requestedPlayerId, identity = null) {
     player.walletMode = provider;
     player.externalUserId = String(identity.userId);
     player.walletCurrency = identity?.currency || player.walletCurrency;
+    if (provider === 'PROVIDER') { player.providerLaunchId = identity.launchId; player.providerPartnerId = identity.partnerId; player.walletDecimals = identity.walletDecimals; }
     if (provider === 'SIDESIX') player.balance = null;
     else if (Number.isFinite(Number(identity?.balance))) player.balance = Number(identity.balance);
   }
@@ -618,7 +661,7 @@ function requirePlatformIdentity(req) {
   const token = bearerToken(req);
   if (!token) return null;
   const session = platformSessionStore.get(token);
-  if (!session?.userId || !['SIDESIX', 'PLATFORM'].includes(session.provider)) {
+  if (!session?.userId || !['SIDESIX', 'PLATFORM', 'PROVIDER'].includes(session.provider)) {
     const error = new Error('Valid external wallet launch session required');
     error.status = 401;
     error.statusCode = 401;
@@ -636,7 +679,7 @@ function assertSessionOwnership(session, identity) {
     return;
   }
   const wallet = walletState(session);
-  if (!identity || identity.provider !== provider || String(wallet?.userId || '') !== String(identity.userId || '')) {
+  if (!identity || identity.provider !== provider || String(wallet?.userId || '') !== String(identity.userId || '') || (provider === 'PROVIDER' && (wallet?.launchId !== identity.launchId || wallet?.partnerId !== identity.partnerId))) {
     const error = new Error('Session does not belong to this wallet player');
     error.status = 403; error.statusCode = 403; error.code = 'WALLET_SESSION_MISMATCH'; throw error;
   }
@@ -724,11 +767,14 @@ const server = http.createServer(async (req, res) => {
   if (isRateLimited(req, path)) return json(res, 429, { error: 'Rate limit exceeded' });
   try {
     if (req.method === 'GET' && path === '/') return json(res, 200, { ok: true, service: 'galaga-skill-wager-be', version: '0.8.1', health: '/api/health' });
-    if (req.method === 'GET' && path === '/api/health') return json(res, 200, { ok: true, service: 'galaga-skill-wager-be', phase: 8, version: '0.8.1', waves: 10, antiCheatMode: String(process.env.ANTI_CHEAT_MODE || 'enforce'), storeSchema: 8 });
+    if (req.method === 'GET' && path === '/api/health') return json(res, 200, { ok: true, service: 'galaga-skill-wager-be', phase: 8, version: '0.8.1', waves: 10, antiCheatMode: String(process.env.ANTI_CHEAT_MODE || 'enforce'), storeSchema: 8, providerEnabled: gameProvider.enabled });
     if (req.method === 'POST' && path === '/api/platform/launch') {
       const body = await readBody(req);
       let identity = null;
-      if (body?.platformLaunchToken) {
+      if (body?.providerLaunchToken) {
+        if (!gameProvider.enabled) { const error = new Error('Game Provider integration is disabled'); error.status = error.statusCode = 503; error.code = 'GAME_PROVIDER_NOT_CONFIGURED'; throw error; }
+        identity = await gameProvider.consumeLaunch({ launchToken: String(body.providerLaunchToken), exchangeId: String(body.exchangeId || randomUUID()) });
+      } else if (body?.platformLaunchToken) {
         if (!platform.configuration.enabled) {
           const error = new Error('Platform wallet integration is disabled'); error.status = error.statusCode = 503; error.code = 'PLATFORM_NOT_CONFIGURED'; throw error;
         }
@@ -790,7 +836,8 @@ const server = http.createServer(async (req, res) => {
       const ensured = ensurePlayer(store, body.playerId, platformIdentity);
       if (!ensured) return json(res, 400, { error: 'Invalid player ID' });
       if (platformIdentity?.provider === 'PLATFORM') await refreshPlatformBalance(ensured.player);
-      if (ensured.created || platformIdentity?.provider === 'PLATFORM') writeStore(store);
+      if (platformIdentity?.provider === 'PROVIDER') await refreshProviderBalance(ensured.player);
+      if (ensured.created || ['PLATFORM', 'PROVIDER'].includes(platformIdentity?.provider)) writeStore(store);
       const active = ensured.player.activeSessionId ? store.sessions[ensured.player.activeSessionId] : null;
       if (await autoSettleExpiredCheckpoint(store, active)) writeStore(store);
       return json(res, ensured.created ? 201 : 200, getPlayerPayload(store, ensured.player.id));
@@ -804,9 +851,11 @@ const server = http.createServer(async (req, res) => {
       if (!playerId) return json(res, 400, { error: 'Invalid player ID' });
       const player = store.players[playerId];
       if (!player) return json(res, 404, { error: 'Player not found' });
+      if (player.walletMode === 'PROVIDER' && (!platformIdentity || platformIdentity.provider !== 'PROVIDER' || player.providerLaunchId !== platformIdentity.launchId)) return json(res, 403, { error: 'Provider player session required' });
       const active = player.activeSessionId ? store.sessions[player.activeSessionId] : null;
       if (await autoSettleExpiredCheckpoint(store, active)) writeStore(store);
       if (platformIdentity?.provider === 'PLATFORM') { await refreshPlatformBalance(player); writeStore(store); }
+      if (platformIdentity?.provider === 'PROVIDER') { await refreshProviderBalance(player); writeStore(store); }
       return json(res, 200, getPlayerPayload(store, playerId));
     }
 
@@ -830,11 +879,13 @@ const server = http.createServer(async (req, res) => {
         const sameRunRequest = Number(session.entryAmount) === entryAmount && session.difficulty === difficulty;
         const resumable = sameRunRequest && (
           (provider === 'SIDESIX' && ['AUTHORIZING', 'ENTRY_PAID'].includes(session.state)) ||
-          (provider === 'PLATFORM' && ['RESERVING', 'ENTRY_PAID'].includes(session.state))
+          (provider === 'PLATFORM' && ['RESERVING', 'ENTRY_PAID'].includes(session.state)) ||
+          (provider === 'PROVIDER' && ['AUTHORIZING', 'ENTRY_PAID'].includes(session.state))
         );
         if (!resumable) return json(res, 409, { error: 'Player already has an active run', activeSession: session });
         if (session.state === 'ENTRY_PAID') {
           if (provider === 'PLATFORM') await refreshPlatformBalance(player);
+          if (provider === 'PROVIDER') await refreshProviderBalance(player);
           return json(res, 200, { player, session });
         }
       } else if (session) {
@@ -848,11 +899,17 @@ const server = http.createServer(async (req, res) => {
         const matchId = `galaga:${sessionId}`;
         session = {
           id: sessionId, playerId, entryAmount, difficulty,
-          state: provider === 'SIDESIX' ? 'AUTHORIZING' : provider === 'PLATFORM' ? 'RESERVING' : 'ENTRY_PAID',
+          state: ['SIDESIX', 'PROVIDER'].includes(provider) ? 'AUTHORIZING' : provider === 'PLATFORM' ? 'RESERVING' : 'ENTRY_PAID',
           walletMode: provider,
           sideSix: provider === 'SIDESIX' ? {
             userId: platformIdentity.userId, authorizeTransactionId: null,
             authorizeRequestId: sideSix.requestId('galaga', sessionId, 'authorize'),
+            playStarted: false, settlementStatus: 'authorizing', refundStatus: null,
+          } : null,
+          providerWallet: provider === 'PROVIDER' ? {
+            userId: platformIdentity.userId, partnerId: platformIdentity.partnerId, launchId: platformIdentity.launchId,
+            currency: platformIdentity.currency, walletDecimals: platformIdentity.walletDecimals,
+            betTransactionId: gameProvider.requestId('bet', platformIdentity.launchId, sessionId),
             playStarted: false, settlementStatus: 'authorizing', refundStatus: null,
           } : null,
           platformWallet: provider === 'PLATFORM' ? {
@@ -880,6 +937,23 @@ const server = http.createServer(async (req, res) => {
         writeStore(store);
       }
 
+      if (provider === 'PROVIDER' && session.state === 'AUTHORIZING') {
+        const wallet = session.providerWallet;
+        try {
+          await gameProvider.operation(wallet, 'bet', { runId: session.id, amount: session.entryAmount, transactionId: wallet.betTransactionId });
+          wallet.authorizedAt = now(); wallet.settlementStatus = 'authorized';
+          session.state = 'ENTRY_PAID'; session.updatedAt = now();
+          await refreshProviderBalance(player);
+          writeStore(store);
+        } catch (error) {
+          // Do not discard an indeterminate wallet debit; retry the same transaction ID.
+          if (['INSUFFICIENT_BALANCE', 'WALLET_INSUFFICIENT_FUNDS'].includes(error?.code)) {
+            if (player.activeSessionId === session.id) player.activeSessionId = null;
+            delete store.sessions[session.id]; writeStore(store);
+          }
+          throw error;
+        }
+      }
       if (provider === 'SIDESIX' && session.state === 'AUTHORIZING') {
         try {
           const authorized = await sideSix.authorize({ userId: session.sideSix.userId, playCost: session.entryAmount, requestId: session.sideSix.authorizeRequestId });
@@ -918,7 +992,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (!session.entryTransactionId) {
-        const debit = transaction(store, { playerId, sessionId: session.id, type: provider === 'PLATFORM' ? 'PLATFORM_RESERVE' : provider === 'SIDESIX' ? 'SIDESIX_AUTHORIZE' : 'ENTRY_DEBIT', amount: -entryAmount, balanceAfter: player.balance, meta: { difficulty, walletMode: session.walletMode } });
+        const debit = transaction(store, { playerId, sessionId: session.id, type: provider === 'PROVIDER' ? 'PROVIDER_BET' : provider === 'PLATFORM' ? 'PLATFORM_RESERVE' : provider === 'SIDESIX' ? 'SIDESIX_AUTHORIZE' : 'ENTRY_DEBIT', amount: -entryAmount, balanceAfter: player.balance, meta: { difficulty, walletMode: session.walletMode } });
         session.entryTransactionId = debit.id;
         recordTelemetry(store, { type: 'session_start', playerId, sessionId: session.id, wave: 1, difficulty, data: { entryAmount, clientVersion: session.clientVersion, walletMode: session.walletMode } });
       }
@@ -935,6 +1009,7 @@ const server = http.createServer(async (req, res) => {
       if (await autoSettleExpiredCheckpoint(store, session)) writeStore(store);
       const sessionPlayer = store.players[session.playerId];
       if (session.walletMode === 'PLATFORM' && sessionPlayer) { await refreshPlatformBalance(sessionPlayer); writeStore(store); }
+      if (session.walletMode === 'PROVIDER' && sessionPlayer) { await refreshProviderBalance(sessionPlayer); writeStore(store); }
       return json(res, 200, { session, player: sessionPlayer });
     }
 
@@ -968,6 +1043,8 @@ const server = http.createServer(async (req, res) => {
         if (player) await refreshPlatformBalance(player);
       } else if (session.walletMode === 'SIDESIX') {
         session.sideSix.playStarted = true;
+      } else if (session.walletMode === 'PROVIDER') {
+        session.providerWallet.playStarted = true;
       }
       session.state = 'WAVE_PLAYING'; session.waveState = { startCore: coreStart(session), startedAt: now(), lastResult: null };
       session.coreState.waveElapsed = 0; session.coreState.enemiesRemaining = WAVE[session.wave]?.enemies || 0;
@@ -1177,6 +1254,7 @@ const server = http.createServer(async (req, res) => {
       if (refunded) session.cancelledBeforePlay = true;
       const player = store.players[session.playerId]; if (player?.activeSessionId === session.id) player.activeSessionId = null;
       if (session.walletMode === 'PLATFORM' && player) await refreshPlatformBalance(player);
+      if (session.walletMode === 'PROVIDER' && player) await refreshProviderBalance(player);
       transaction(store, { playerId: session.playerId, sessionId: session.id, type: 'ABANDON_SETTLEMENT', amount: 0, balanceAfter: player?.balance ?? 0, meta: { wave: session.wave, score: session.score } });
       recordTelemetry(store, { type: 'run_abandon', playerId: session.playerId, sessionId: session.id, wave: session.wave, difficulty: session.difficulty, data: { score: session.score } });
       writeStore(store); return json(res, 200, { player, session });
