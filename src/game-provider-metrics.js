@@ -19,8 +19,8 @@ export function startGameMetricsReporter({gameId, adapterKeyEnv, minBetCredits, 
       const min=Number(typeof minBetCredits==='function'?minBetCredits():NaN);
       const minBetMinor=Number.isFinite(min)&&min>0&&Number.isSafeInteger(Math.round(min*100))
         ? Math.round(min*100):null;
-      const observed=Number(typeof onlinePlayers==='function'?onlinePlayers():NaN);
-      const online=Number.isSafeInteger(observed)&&observed>=0&&observed<=1000000?observed:null;
+      const observed=typeof onlinePlayers==='function'?onlinePlayers():null;
+      const online=typeof observed==='number'&&Number.isSafeInteger(observed)&&observed>=0&&observed<=1000000?observed:null;
       const at=Math.max(Date.now(),lastObserved+1);
       lastObserved=at;
       const controller=new AbortController();
