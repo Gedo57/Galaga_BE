@@ -1,3 +1,4 @@
+import {startGameMetricsReporter} from './game-provider-metrics.js';
 import http from 'node:http';
 import { randomUUID, createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -1280,6 +1281,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
-if (isMain) server.listen(PORT, '0.0.0.0', () => console.log(`Galaga Skill Wager BE listening on http://0.0.0.0:${PORT}`));
+if (isMain) { server.listen(PORT, '0.0.0.0', () => console.log(`Galaga Skill Wager BE listening on http://0.0.0.0:${PORT}`));
+  startGameMetricsReporter({gameId:'galaga',adapterKeyEnv:'GAME_PROVIDER_GALAGA_ADAPTER_KEY',minBetCredits:()=>ENTRY_MIN});
+}
 
 export { server, readStore, writeStore, coreStart, defaultCore, WAVE, CHECKPOINTS, SCORE, DIFFICULTY_ECONOMY, economyForDifficulty, startMultiplierForDifficulty, scoreGateForDifficulty, checkpointMultiplierForDifficulty, comboMaxForDifficulty, rewardTiersForDifficulty, checkpointsForDifficulty, payoutOpportunitiesForDifficulty, checkpointPayload, buildSettlement, unlockedTier };
