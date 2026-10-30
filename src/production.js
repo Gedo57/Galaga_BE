@@ -13,7 +13,7 @@ export function bossHpForDifficulty(type, difficulty = 'medium') {
 
 export const PHASE8_TARGETS = Object.freeze({
   survivalPercent: Object.freeze({ 1: 97, 2: 90, 3: 78, 4: 66, 5: 52, 6: 42, 7: 31, 8: 22, 9: 14, 10: 7 }),
-  economyReturnPercent: Object.freeze({ min: 94, max: 96 }),
+  economyReturnPercent: Object.freeze({ min: 96, max: 98 }),
   runLengthSeconds: Object.freeze({ min: 240, max: 360 }),
   waveTargetSeconds: Object.freeze({ min: 35, max: 45 })
 });
@@ -217,8 +217,11 @@ export function buildTelemetrySummary(store) {
   const completedRuns = sessions.filter((s) => ['RESULT', 'RUN_LOST', 'BOSS_COMPLETE'].includes(s.state) || s.closedAt).length;
   const bossReached = sessions.filter((s) => Number(s.wave || 0) >= 10).length;
   const bossKilled = sessions.filter((s) => (s.completedWaves || []).some((w) => Number(w.wave) === 10)).length;
-  const totalEntry = sessions.reduce((sum, s) => sum + nonNegative(s.entryAmount), 0);
-  const totalReward = sessions.reduce((sum, s) => sum + nonNegative(s.reward), 0);
+  // Only terminal settled sessions belong in the RTP denominator. Live wagers
+  // cannot be counted as losses while their eventual payout is still unknown.
+  const settledSessions = sessions.filter((s) => ['RESULT', 'RUN_LOST', 'BOSS_COMPLETE'].includes(s.state));
+  const totalEntry = settledSessions.reduce((sum, s) => sum + nonNegative(s.entryAmount), 0);
+  const totalReward = settledSessions.reduce((sum, s) => sum + nonNegative(s.reward), 0);
   const returnPercent = totalEntry > 0 ? totalReward / totalEntry * 100 : 0;
 
   const survival = {};
@@ -264,6 +267,10 @@ export function buildTelemetrySummary(store) {
     economy: {
       totalEntryCoins: totalEntry,
       totalRewardCoins: totalReward,
+      settledRuns: settledSessions.length,
+      unsettledRunsExcluded: sessions.length - settledSessions.length,
+      certified: false,
+      basis: 'TERMINAL_SETTLED_RUNS_ONLY',
       returnPercent: round(returnPercent),
       targetReturnPercent: PHASE8_TARGETS.economyReturnPercent,
       withinTarget: totalEntry > 0 && returnPercent >= PHASE8_TARGETS.economyReturnPercent.min && returnPercent <= PHASE8_TARGETS.economyReturnPercent.max
@@ -294,6 +301,6 @@ export function buildBalanceReport(store) {
     economy: summary.economy,
     survivalWarnings,
     survivalByWave: summary.survivalByWave,
-    note: 'Phase 8 reports deviations; it does not silently rebalance score gates, payouts, or difficulty without playtest evidence.'
+    note: '97% +/-1 percentage point is the target for terminal settled runs only; skill, cashout strategy and sample size affect actual return. No hidden outcome balancing. Not certified.'
   };
 }
