@@ -67,3 +67,13 @@ test('only 100 settled runs may be flagged on target',()=>{
  assert.equal(report.economyStatus,'ON_TARGET');
  assert.equal(report.economy.certified,false);
 });
+
+test('live runs do not count as failed runs in survival calibration',()=>{
+ const won=session('won','RESULT',1000,970);
+ won.completedWaves=[{wave:1}];
+ const active=session('active','WAVE_PLAYING',1000,0);
+ const result=buildTelemetrySummary({sessions:{won,active},players:{},transactions:[],telemetry:{events:[]}});
+ assert.equal(result.survivalByWave[1].cleared,1);
+ assert.equal(result.survivalByWave[1].settledDenominator,1);
+ assert.equal(result.survivalByWave[1].actualPercent,100);
+});
