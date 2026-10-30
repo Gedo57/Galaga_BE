@@ -290,13 +290,16 @@ export function buildBalanceReport(store) {
     .map(([wave, row]) => ({ wave: Number(wave), actualPercent: row.actualPercent, targetPercent: row.targetPercent, deltaPercent: row.deltaPercent }));
   let economyStatus = 'NO_DATA';
   if (summary.economy.totalEntryCoins > 0) {
-    economyStatus = summary.economy.withinTarget ? 'ON_TARGET' : summary.economy.returnPercent < PHASE8_TARGETS.economyReturnPercent.min ? 'RETURN_LOW' : 'RETURN_HIGH';
+    economyStatus = summary.economy.settledRuns < 100 ? 'INSUFFICIENT_SAMPLE'
+      : summary.economy.withinTarget ? 'ON_TARGET'
+      : summary.economy.returnPercent < PHASE8_TARGETS.economyReturnPercent.min ? 'RETURN_LOW' : 'RETURN_HIGH';
   }
   return {
     generatedAt: summary.generatedAt,
-    sampleSize: summary.runs.total,
+    sampleSize: summary.economy.settledRuns,
+    openRunsExcluded: summary.economy.unsettledRunsExcluded,
     minimumRecommendedPlaytests: 100,
-    dataConfidence: summary.runs.total >= 100 ? 'PLAYTEST_BASELINE' : summary.runs.total >= 30 ? 'EARLY_SIGNAL' : 'INSUFFICIENT_SAMPLE',
+    dataConfidence: summary.economy.settledRuns >= 100 ? 'PLAYTEST_BASELINE' : summary.economy.settledRuns >= 30 ? 'EARLY_SIGNAL' : 'INSUFFICIENT_SAMPLE',
     economyStatus,
     economy: summary.economy,
     survivalWarnings,
