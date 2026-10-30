@@ -223,6 +223,26 @@ export function buildTelemetrySummary(store) {
   const totalEntry = settledSessions.reduce((sum, s) => sum + nonNegative(s.entryAmount), 0);
   const totalReward = settledSessions.reduce((sum, s) => sum + nonNegative(s.reward), 0);
   const returnPercent = totalEntry > 0 ? totalReward / totalEntry * 100 : 0;
+  const aggregateSettledRtp = (items) => {
+    const wagered = items.reduce((sum, s) => sum + nonNegative(s.entryAmount), 0);
+    const payout = items.reduce((sum, s) => sum + nonNegative(s.reward), 0);
+    const observedRtpPercent = wagered > 0 ? round(payout / wagered * 100) : null;
+    return {
+      settledRuns: items.length, wagered, payout, observedRtpPercent,
+      sampleReady: items.length >= 100,
+      status: wagered <= 0 ? 'NO_WAGER' : items.length < 100 ? 'INSUFFICIENT_SAMPLE'
+        : observedRtpPercent >= PHASE8_TARGETS.economyReturnPercent.min &&
+          observedRtpPercent <= PHASE8_TARGETS.economyReturnPercent.max
+          ? 'ON_TARGET' : observedRtpPercent < PHASE8_TARGETS.economyReturnPercent.min
+          ? 'RETURN_LOW' : 'RETURN_HIGH',
+      certified: false,
+    };
+  };
+  const settledRtpByDifficulty = Object.fromEntries(['easy','medium','hard'].map(diff =>
+    [diff, aggregateSettledRtp(settledSessions.filter(s => s.difficulty === diff))]));
+  const settledRtpByFinalWave = Object.fromEntries(Array.from({length:10},(_,i)=>[
+    String(i+1),aggregateSettledRtp(settledSessions.filter(s => Number(s.wave) === i+1)),
+  ]));
 
   const survival = {};
   for (let wave = 1; wave <= 10; wave += 1) {
@@ -271,6 +291,8 @@ export function buildTelemetrySummary(store) {
       unsettledRunsExcluded: sessions.length - settledSessions.length,
       certified: false,
       basis: 'TERMINAL_SETTLED_RUNS_ONLY',
+      byDifficulty: settledRtpByDifficulty,
+      byFinalWave: settledRtpByFinalWave,
       returnPercent: round(returnPercent),
       targetReturnPercent: PHASE8_TARGETS.economyReturnPercent,
       withinTarget: totalEntry > 0 && returnPercent >= PHASE8_TARGETS.economyReturnPercent.min && returnPercent <= PHASE8_TARGETS.economyReturnPercent.max
