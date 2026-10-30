@@ -37,7 +37,8 @@ test('failed terminal runs are included rather than misreported as free wagers',
  assert.equal(r.economy.totalEntryCoins,1000);
  assert.equal(r.economy.totalRewardCoins,970);
  assert.equal(r.economy.returnPercent,97);
- assert.equal(r.economyStatus,'ON_TARGET');
+ assert.equal(r.economyStatus,'INSUFFICIENT_SAMPLE');
+ assert.equal(r.sampleSize,2);
 });
 test('checkpoint multipliers only give conditional success thresholds, never certified RTP',()=>{
  for(const cfg of Object.values(DIFFICULTY_ECONOMY)){
@@ -47,4 +48,16 @@ test('checkpoint multipliers only give conditional success thresholds, never cer
      assert.ok(Math.abs(m*p-0.97)<1e-12);
    }
  }
+});
+
+test('only 100 settled runs may be flagged on target',()=>{
+ const sessions={};
+ for(let i=0;i<100;i++)sessions['settled-'+i]=session('settled-'+i,'RESULT',1000,970);
+ for(let i=0;i<20;i++)sessions['active-'+i]=session('active-'+i,'WAVE_PLAYING',10000,0);
+ const report=buildBalanceReport({sessions,players:{},transactions:[],telemetry:{events:[]}});
+ assert.equal(report.sampleSize,100);
+ assert.equal(report.openRunsExcluded,20);
+ assert.equal(report.economy.returnPercent,97);
+ assert.equal(report.economyStatus,'ON_TARGET');
+ assert.equal(report.economy.certified,false);
 });
