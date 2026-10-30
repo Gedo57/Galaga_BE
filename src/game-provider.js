@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 const GAME_ID = 'galaga';
 const enabled = String(process.env.GAME_PROVIDER_GALAGA_ENABLED || 'false').trim().toLowerCase() === 'true';
 const baseUrl = String(process.env.GAME_PROVIDER_API_URL || '').trim().replace(/\/+$/, '');
+const qaMode=String(process.env.GAME_PROVIDER_GALAGA_QA_MODE || 'false').trim().toLowerCase()==='true';
+const preprodQaOrigin='https://g-provider-preproduction-sso-free.onrender.com';
 const key = String(process.env.GAME_PROVIDER_GALAGA_ADAPTER_KEY || '').trim();
 const credentials = /^[A-Za-z0-9_-]{32,256}$/;
 const identifier = /^[A-Za-z0-9_.:-]{8,128}$/;
@@ -18,12 +20,15 @@ function requireConfigured() {
   const devLocal = process.env.NODE_ENV !== 'production' && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(baseUrl);
   if (!/^https:\/\//.test(baseUrl) && !devLocal) throw issue('GAME_PROVIDER_URL_INVALID');
   if (!credentials.test(key)) throw issue('GAME_PROVIDER_ADAPTER_KEY_INVALID');
+  // QA is fake-credit only and can never be silently pointed at a real casino wallet.
+  if (qaMode && baseUrl!==preprodQaOrigin) throw issue('GAME_PROVIDER_QA_ORIGIN_INVALID');
+  if (qaMode && !enabled) throw issue('GAME_PROVIDER_QA_DISABLED');
 }
 async function post(path, body) {
   requireConfigured();
   let response, payload;
   try {
-    response = await fetch(`${baseUrl}/api/v1/${path}`, {
+    response = await fetch(`${baseUrl}/${qaMode?'api/v1/preprod/galaga':'api/v1'}/${path}`, {
       method: 'POST', redirect: 'error', signal: AbortSignal.timeout(8000),
       headers: { 'Content-Type': 'application/json', 'X-Game-Adapter-Key': key },
       body: JSON.stringify(body),
