@@ -246,11 +246,14 @@ export function buildTelemetrySummary(store) {
 
   const survival = {};
   for (let wave = 1; wave <= 10; wave += 1) {
-    const cleared = sessions.filter((s) => (s.completedWaves || []).some((row) => Number(row.wave) === wave)).length;
-    const actual = totalRuns > 0 ? cleared / totalRuns * 100 : 0;
+    // Live rounds have not yet failed later waves. Counting them as losses
+    // biases survival calibration downward and invalidates RTP forecasts.
+    const cleared = settledSessions.filter((s) => (s.completedWaves || []).some((row) => Number(row.wave) === wave)).length;
+    const actual = settledSessions.length > 0 ? cleared / settledSessions.length * 100 : 0;
     survival[wave] = {
       cleared,
       actualPercent: round(actual),
+      settledDenominator: settledSessions.length,
       targetPercent: PHASE8_TARGETS.survivalPercent[wave],
       deltaPercent: round(actual - PHASE8_TARGETS.survivalPercent[wave])
     };
