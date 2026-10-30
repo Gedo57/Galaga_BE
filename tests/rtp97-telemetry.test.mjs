@@ -23,6 +23,10 @@ test('live run with a paid wager is excluded until its loss or payout settles',(
  assert.equal(r.economy.settledRuns,1);
  assert.equal(r.economy.unsettledRunsExcluded,1);
  assert.equal(r.economy.withinTarget,true);
+ assert.equal(r.economy.byDifficulty.medium.wagered,1000);
+ assert.equal(r.economy.byDifficulty.medium.observedRtpPercent,97);
+ assert.equal(r.economy.byFinalWave['1'].settledRuns,1);
+ assert.equal(r.economy.byFinalWave['1'].certified,false);
  assert.equal(r.economy.certified,false);
 });
 
@@ -58,6 +62,8 @@ test('only 100 settled runs may be flagged on target',()=>{
  assert.equal(report.sampleSize,100);
  assert.equal(report.openRunsExcluded,20);
  assert.equal(report.economy.returnPercent,97);
+ assert.equal(report.economy.byDifficulty.medium.settledRuns,100);
+ assert.equal(report.economy.byDifficulty.medium.status,'ON_TARGET');
  assert.equal(report.economyStatus,'ON_TARGET');
  assert.equal(report.economy.certified,false);
 });
