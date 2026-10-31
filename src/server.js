@@ -8,6 +8,9 @@ import { ensurePhase8Store, recordTelemetry, validateCoreSnapshot, applyValidati
 import { createSideSixClient } from './sidesix.js';
 import { createPlatformClient } from './platform.js';
 import { gameProvider } from './game-provider.js';
+import {providerRtp} from './provider-rtp-target.js';
+import {freezePayoutTarget} from './rtp-payout.js';
+import {createProviderRtpClient} from './provider-rtp-target.js';
 import { platformSessionStore } from './platformSessionStore.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -347,6 +350,7 @@ function checkpointPayload(session, def) {
   const next = nextPayoutOpportunity(session.wave, session.difficulty);
   const startMultiplier = startMultiplierForDifficulty(session.difficulty);
   const currentMultiplier = best?.multiplier || startMultiplier;
+  const payoutScale=session.rtpConfig?.applied===true?session.rtpConfig.scale:1;
   const scoreGate = scoreGateForDifficulty(session.wave, session.difficulty);
   const checkpointMultiplier = checkpointMultiplierForDifficulty(session.wave, session.difficulty);
   return {
@@ -359,12 +363,15 @@ function checkpointPayload(session, def) {
     bestUnlockedMultiplier: currentMultiplier,
     payoutSource: best ? 'checkpoint' : 'start',
     startMultiplier,
-    currentReward: Math.round(session.entryAmount * currentMultiplier),
-    potentialReward: Math.round(session.entryAmount * checkpointMultiplier),
+    payoutScale,
+    rtpTargetBps:session.rtpConfig?.targetRtpBps??9700,
+    rtpRevision:session.rtpConfig?.revision??0,
+    currentReward: Math.round(session.entryAmount * currentMultiplier * payoutScale),
+    potentialReward: Math.round(session.entryAmount * checkpointMultiplier * payoutScale),
     nextCheckpointWave: next?.wave || null,
     nextScoreGate: next?.scoreGate || null,
     nextMultiplier: next?.multiplier || null,
-    nextReward: next ? Math.round(session.entryAmount * next.multiplier) : null,
+    nextReward: next ? Math.round(session.entryAmount * next.multiplier * payoutScale) : null,
     decisionSeconds: DECISION_SECONDS,
     decisionStartedAt: now(),
     decisionDeadline: new Date(Date.now() + DECISION_SECONDS * 1000).toISOString(),
@@ -373,9 +380,11 @@ function checkpointPayload(session, def) {
 }
 function buildSettlement(session, tier, mode) {
   const multiplier = tier?.multiplier || startMultiplierForDifficulty(session.difficulty);
-  const reward = Math.round(session.entryAmount * multiplier);
+  const payoutScale=session.rtpConfig?.applied===true?session.rtpConfig.scale:1;
+  const reward = Math.round(session.entryAmount * multiplier * payoutScale);
   return {
     wave: session.wave, multiplier, tierWave: tier?.wave || null, reward,
+    payoutScale,rtpTargetBps:session.rtpConfig?.targetRtpBps??9700,rtpRevision:session.rtpConfig?.revision??0,
     payoutSource: tier ? 'checkpoint' : 'start',
     entryAmount: session.entryAmount, netProfit: reward - session.entryAmount,
     mode, score: session.score, settledAt: now()
@@ -895,11 +904,15 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (!session) {
+        // Fetch target before reserving a wager. Production wallet is explicitly excluded.
+        const rtpConfig=provider==='PROVIDER' && platformIdentity?.productionWallet!==true && gameProvider.productionEnabled!==true
+          ? freezePayoutTarget(await providerRtp.snapshot())
+          : freezePayoutTarget(null);
         const sessionId = randomUUID();
         const created = now();
         const matchId = `galaga:${sessionId}`;
         session = {
-          id: sessionId, playerId, entryAmount, difficulty,
+          id: sessionId, playerId, entryAmount, difficulty, rtpConfig,
           state: ['SIDESIX', 'PROVIDER'].includes(provider) ? 'AUTHORIZING' : provider === 'PLATFORM' ? 'RESERVING' : 'ENTRY_PAID',
           walletMode: provider,
           sideSix: provider === 'SIDESIX' ? {
@@ -1283,6 +1296,17 @@ const server = http.createServer(async (req, res) => {
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) { server.listen(PORT, '0.0.0.0', () => console.log(`Galaga Skill Wager BE listening on http://0.0.0.0:${PORT}`));
   startGameMetricsReporter({gameId:'galaga',adapterKeyEnv:'GAME_PROVIDER_GALAGA_ADAPTER_KEY',minBetCredits:()=>ENTRY_MIN});
+  // Read-only target authentication check, no RNG or wallet changes.
+  if(process.env.GAME_PROVIDER_RTP_PROBE_ENABLED==='true'){
+    if(gameProvider.productionEnabled===true)
+      console.info('RTP_SANDBOX_PROBE_SKIPPED_PRODUCTION');
+    else {
+      const check=createProviderRtpClient({env:{...process.env,GAME_PROVIDER_RTP_ENABLED:'true'}});
+      void check.snapshot().then(v=>
+        console.info('RTP_SANDBOX_PROBE_OK game=galaga targetBps='+v.targetRtpBps+' revision='+v.revision)
+      ).catch(e=>console.warn('RTP_SANDBOX_PROBE_FAILED code='+String(e?.code||'UNKNOWN')));
+    }
+  }
 }
 
 export { server, readStore, writeStore, coreStart, defaultCore, WAVE, CHECKPOINTS, SCORE, DIFFICULTY_ECONOMY, economyForDifficulty, startMultiplierForDifficulty, scoreGateForDifficulty, checkpointMultiplierForDifficulty, comboMaxForDifficulty, rewardTiersForDifficulty, checkpointsForDifficulty, payoutOpportunitiesForDifficulty, checkpointPayload, buildSettlement, unlockedTier };
