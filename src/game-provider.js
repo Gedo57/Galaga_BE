@@ -1,3 +1,5 @@
+import {createProductionGameWalletBridge} from './production-provider-wallet.js';
+const production=createProductionGameWalletBridge({gameId:'galaga'});
 import { createHash } from 'node:crypto';
 
 const GAME_ID = 'galaga';
@@ -62,9 +64,19 @@ function amountMinor(value, decimals) {
   return amount;
 }
 export const gameProvider = Object.freeze({
-  get enabled() { return enabled; },
+  get enabled(){return enabled||production.enabled;},
   requestId(...parts) { return createHash('sha256').update([GAME_ID, ...parts].join('|')).digest('hex'); },
   async consumeLaunch({ launchToken, exchangeId }) {
+    if(production.enabled){
+      const i=await production.consumeLaunch(launchToken,exchangeId);
+      return {provider:'PROVIDER',userId:i.externalPlayerId,
+  partnerId:i.operatorCode,operatorCode:i.operatorCode,
+  externalPlayerId:i.externalPlayerId,launchId:i.launchId,
+  userName:'Player',currency:i.currency,walletDecimals:i.decimals,
+  locale:'en',returnUrl:null,productionWallet:true,
+  gameId:i.gameId,sessionToken:i.sessionToken,decimals:i.decimals,
+  expiresAt:i.expiresAt};
+    }
     if (!/^[A-Za-z0-9_-]{43}$/.test(String(launchToken || '')) || !identifier.test(String(exchangeId || ''))) {
       throw issue('GAME_PROVIDER_LAUNCH_INVALID', 400);
     }
@@ -81,6 +93,10 @@ export const gameProvider = Object.freeze({
       locale: data.locale || 'en', returnUrl: null };
   },
   async getBalance(identity) {
+    if(production.enabled){
+     const data=await production.balance(identity);
+     return {available:data.balanceMinor/10**identity.walletDecimals,currency:data.currency};
+    }
     const wallet = validateWallet(identity);
     const data = await post('wallet/balance', { gameId: GAME_ID, launchId: wallet.launchId });
     if (!Number.isSafeInteger(data.balanceMinor) || data.balanceMinor < 0 || data.currency !== wallet.currency) {
@@ -89,6 +105,12 @@ export const gameProvider = Object.freeze({
     return { available: data.balanceMinor / (10 ** wallet.walletDecimals), currency: data.currency };
   },
   async operation(identity, operation, { runId, amount, transactionId, betTransactionId = null }) {
+    if(production.enabled){
+     if(!['bet','win','refund'].includes(operation))
+      throw Object.assign(new Error('PRODUCTION_GAME_ACTION_UNSUPPORTED'),{code:'PRODUCTION_GAME_ACTION_UNSUPPORTED',status:403});
+     return production.operation(identity,operation,{
+      roundId:runId,amount,transactionId,betTransactionId});
+    }
     const wallet = validateWallet(identity);
     if (!['bet','win','refund'].includes(operation) || !identifier.test(transactionId || '') ||
       !/^[A-Za-z0-9_.:-]{1,128}$/.test(String(runId || ''))) throw issue('GAME_PROVIDER_TRANSACTION_INVALID', 400);
