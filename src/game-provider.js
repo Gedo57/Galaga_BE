@@ -1,5 +1,7 @@
+import {createExhibitionGameBridge} from './exhibition-demo-bridge.js';
 import {createProductionGameWalletBridge} from './production-provider-wallet.js';
 const production=createProductionGameWalletBridge({gameId:'galaga'});
+const demo=createExhibitionGameBridge('galaga');
 import { createHash } from 'node:crypto';
 
 const GAME_ID = 'galaga';
@@ -64,9 +66,15 @@ function amountMinor(value, decimals) {
   return amount;
 }
 export const gameProvider = Object.freeze({
-  get enabled(){return enabled||production.enabled;},
+  get enabled(){return enabled||production.enabled||demo.enabled;},
   requestId(...parts) { return createHash('sha256').update([GAME_ID, ...parts].join('|')).digest('hex'); },
   async consumeLaunch({ launchToken, exchangeId }) {
+    if(demo.isTicket(launchToken)){
+      const d=await demo.consume(launchToken,exchangeId);
+      return {provider:'PROVIDER',userId:d.externalPlayerId,partnerId:d.integratorId,
+          externalPlayerId:d.externalPlayerId,launchId:d.launchId,userName:'Player',
+          currency:'USD',walletDecimals:2,locale:'en',returnUrl:null};
+    }
     if(production.enabled){
       const i=await production.consumeLaunch(launchToken,exchangeId);
       return {provider:'PROVIDER',userId:i.externalPlayerId,
@@ -93,6 +101,10 @@ export const gameProvider = Object.freeze({
       locale: data.locale || 'en', returnUrl: null };
   },
   async getBalance(identity) {
+    if(demo.isSession(identity)){
+      const d=await demo.balance(identity);
+      return {available:d.balanceMinor/100,currency:'USD'};
+    }
     if(production.enabled){
      const data=await production.balance(identity);
      return {available:data.balanceMinor/10**identity.walletDecimals,currency:data.currency};
@@ -105,6 +117,8 @@ export const gameProvider = Object.freeze({
     return { available: data.balanceMinor / (10 ** wallet.walletDecimals), currency: data.currency };
   },
   async operation(identity, operation, { runId, amount, transactionId, betTransactionId = null }) {
+    if(demo.isSession(identity))return demo.operation(identity,operation,
+      {roundId:runId,amount,transactionId,betTransactionId});
     if(production.enabled){
      if(!['bet','win','refund'].includes(operation))
       throw Object.assign(new Error('PRODUCTION_GAME_ACTION_UNSUPPORTED'),{code:'PRODUCTION_GAME_ACTION_UNSUPPORTED',status:403});
