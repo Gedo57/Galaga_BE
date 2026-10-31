@@ -1,0 +1,24 @@
+name: Signed Production Wallet Bridge
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/production-provider-wallet.js'
+      - 'src/game-provider.js'
+      - 'tests/production-provider-wallet.test.mjs'
+      - '.github/workflows/production-provider-wallet-ci.yml'
+  workflow_dispatch:
+jobs:
+  wallet-bridge:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: |
+          node --check src/production-provider-wallet.js
+          node --check src/game-provider.js
+          node --test tests/production-provider-wallet.test.mjs
