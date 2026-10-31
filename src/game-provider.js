@@ -67,7 +67,7 @@ function amountMinor(value, decimals) {
 }
 export const gameProvider = Object.freeze({
   get enabled(){return enabled||production.enabled||demo.enabled;},
-  get productionEnabled(){return production.enabled===true;}
+  get productionEnabled(){return production.enabled===true;},
   requestId(...parts) { return createHash('sha256').update([GAME_ID, ...parts].join('|')).digest('hex'); },
   async consumeLaunch({ launchToken, exchangeId }) {
     if(demo.isTicket(launchToken)){
