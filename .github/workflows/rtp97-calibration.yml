@@ -1,0 +1,32 @@
+name: Galaga RTP97 calibration (read-only)
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/rtp-calibration.js'
+      - 'tests/rtp-calibration-patch4.test.mjs'
+      - 'scripts/rtp97-galaga-calibrate.mjs'
+      - 'docs/RTP97_PATCH4_GALAGA_CALIBRATION.md'
+      - '.github/workflows/rtp97-calibration.yml'
+  pull_request:
+    paths:
+      - 'src/rtp-calibration.js'
+      - 'tests/rtp-calibration-patch4.test.mjs'
+      - 'scripts/rtp97-galaga-calibrate.mjs'
+      - 'docs/RTP97_PATCH4_GALAGA_CALIBRATION.md'
+      - '.github/workflows/rtp97-calibration.yml'
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --check src/rtp-calibration.js
+      - run: node --check scripts/rtp97-galaga-calibrate.mjs
+      - run: node --test tests/rtp-calibration-patch4.test.mjs tests/rtp97-telemetry.test.mjs tests/rtp-payout-lock.test.js
+      - run: node scripts/rtp97-galaga-calibrate.mjs
