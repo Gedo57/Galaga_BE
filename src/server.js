@@ -916,6 +916,7 @@ const server = http.createServer(async (req, res) => {
           // Freeze the isolated fake-credit QA calibration before any entry debit.
           const qa=freezeGalagaLocalSandboxPolicy({difficulty,walletMode:provider});
           if(qa)rtpConfig=qa;
+          else if(providerRtp.localDemoEnabled)rtpConfig=freezePayoutTarget(providerRtp.localSnapshot());
         }
         const sessionId = randomUUID();
         const created = now();
