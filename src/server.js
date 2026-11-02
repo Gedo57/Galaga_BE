@@ -10,6 +10,8 @@ import { createPlatformClient } from './platform.js';
 import { gameProvider } from './game-provider.js';
 import {providerRtp} from './provider-rtp-target.js';
 import {freezePayoutTarget} from './rtp-payout.js';
+import {freezeGalagaLocalSandboxPolicy} from './rtp-sandbox-policy.js';
+import {calculateGalagaSettlementReward} from './rtp-settlement.js';
 import {createProviderRtpClient} from './provider-rtp-target.js';
 import { platformSessionStore } from './platformSessionStore.js';
 
@@ -366,12 +368,12 @@ function checkpointPayload(session, def) {
     payoutScale,
     rtpTargetBps:session.rtpConfig?.targetRtpBps??9700,
     rtpRevision:session.rtpConfig?.revision??0,
-    currentReward: Math.round(session.entryAmount * currentMultiplier * payoutScale),
-    potentialReward: Math.round(session.entryAmount * checkpointMultiplier * payoutScale),
+    currentReward: calculateGalagaSettlementReward(session,currentMultiplier).reward,
+    potentialReward: calculateGalagaSettlementReward(session,checkpointMultiplier).reward,
     nextCheckpointWave: next?.wave || null,
     nextScoreGate: next?.scoreGate || null,
     nextMultiplier: next?.multiplier || null,
-    nextReward: next ? Math.round(session.entryAmount * next.multiplier * payoutScale) : null,
+    nextReward: next ? calculateGalagaSettlementReward(session,next.multiplier).reward : null,
     decisionSeconds: DECISION_SECONDS,
     decisionStartedAt: now(),
     decisionDeadline: new Date(Date.now() + DECISION_SECONDS * 1000).toISOString(),
@@ -381,10 +383,12 @@ function checkpointPayload(session, def) {
 function buildSettlement(session, tier, mode) {
   const multiplier = tier?.multiplier || startMultiplierForDifficulty(session.difficulty);
   const payoutScale=session.rtpConfig?.applied===true?session.rtpConfig.scale:1;
-  const reward = Math.round(session.entryAmount * multiplier * payoutScale);
+  const payout=calculateGalagaSettlementReward(session,multiplier);
+  const reward=payout.reward;
   return {
     wave: session.wave, multiplier, tierWave: tier?.wave || null, reward,
     payoutScale,rtpTargetBps:session.rtpConfig?.targetRtpBps??9700,rtpRevision:session.rtpConfig?.revision??0,
+    payoutModel:payout.payoutModel,sandboxRtpCalibrationApplied:payout.sandboxCalibrated,
     payoutSource: tier ? 'checkpoint' : 'start',
     entryAmount: session.entryAmount, netProfit: reward - session.entryAmount,
     mode, score: session.score, settledAt: now()
@@ -905,9 +909,14 @@ const server = http.createServer(async (req, res) => {
 
       if (!session) {
         // Fetch target before reserving a wager. Production wallet is explicitly excluded.
-        const rtpConfig=provider==='PROVIDER' && platformIdentity?.productionWallet!==true && gameProvider.productionEnabled!==true
+        let rtpConfig=provider==='PROVIDER' && platformIdentity?.productionWallet!==true && gameProvider.productionEnabled!==true
           ? freezePayoutTarget(await providerRtp.snapshot())
           : freezePayoutTarget(null);
+        if(provider==='LOCAL') {
+          // Freeze the isolated fake-credit QA calibration before any entry debit.
+          const qa=freezeGalagaLocalSandboxPolicy({difficulty,walletMode:provider});
+          if(qa)rtpConfig=qa;
+        }
         const sessionId = randomUUID();
         const created = now();
         const matchId = `galaga:${sessionId}`;

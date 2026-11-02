@@ -12,7 +12,8 @@
 import { DIFFICULTY_ECONOMY, unlockedTier, buildSettlement } from './server.js';
 
 export const GALAGA_RTP_TARGET=0.97;
-export const GALAGA_QA_RULES='galaga-economy-v0.8.1-unattested';
+export {GALAGA_QA_RULES} from './rtp-calibration-rules.js';
+import {GALAGA_QA_RULES} from './rtp-calibration-rules.js';
 export const GALAGA_MAX_ROWS=100000;
 const ID=/^[A-Za-z0-9._:-]{8,128}$/;
 const POLICY=/^[a-z][a-z0-9_-]{3,63}$/;

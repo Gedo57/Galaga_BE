@@ -1,0 +1,40 @@
+name: RTP97 implementation Patch 2 - Galaga real fake-credit settlement
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/server.js'
+      - 'src/rtp-settlement.js'
+      - 'src/rtp-sandbox-policy.js'
+      - 'src/rtp-calibration-rules.js'
+      - 'src/rtp-calibration.js'
+      - 'tests/rtp97-real-engine-patch2.test.mjs'
+      - 'docs/RTP97_IMPLEMENTATION_PATCH2_GALAGA.md'
+      - '.github/workflows/rtp97-real-engine-patch2.yml'
+  pull_request:
+    paths:
+      - 'src/server.js'
+      - 'src/rtp-settlement.js'
+      - 'src/rtp-sandbox-policy.js'
+      - 'src/rtp-calibration-rules.js'
+      - 'src/rtp-calibration.js'
+      - 'tests/rtp97-real-engine-patch2.test.mjs'
+      - 'docs/RTP97_IMPLEMENTATION_PATCH2_GALAGA.md'
+      - '.github/workflows/rtp97-real-engine-patch2.yml'
+permissions:
+  contents: read
+jobs:
+  real-game-cashout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check actual server settlement and policy syntax
+        run: node --check src/server.js && node --check src/rtp-settlement.js && node --check src/rtp-sandbox-policy.js
+      - name: Run actual backend HTTP cashouts with fake-credit balances plus regressions
+        run: node --test tests/rtp97-real-engine-patch2.test.mjs tests/rtp-payout-lock.test.js tests/cashout-floor-fix-patch6-2.test.mjs tests/rtp-calibration-patch4.test.mjs
+      - name: Run existing backend API smoke test
+        run: node scripts/smoke-test.mjs
