@@ -9,6 +9,7 @@ on:
       - 'src/rtp-calibration-rules.js'
       - 'src/rtp-calibration.js'
       - 'tests/rtp97-real-engine-patch2.test.mjs'
+      - 'scripts/smoke-test.mjs'
       - 'docs/RTP97_IMPLEMENTATION_PATCH2_GALAGA.md'
       - '.github/workflows/rtp97-real-engine-patch2.yml'
   pull_request:
@@ -19,6 +20,7 @@ on:
       - 'src/rtp-calibration-rules.js'
       - 'src/rtp-calibration.js'
       - 'tests/rtp97-real-engine-patch2.test.mjs'
+      - 'scripts/smoke-test.mjs'
       - 'docs/RTP97_IMPLEMENTATION_PATCH2_GALAGA.md'
       - '.github/workflows/rtp97-real-engine-patch2.yml'
 permissions:
