@@ -4,6 +4,7 @@ import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 
+const PLAYER_ID='player-rtp97impltest0001';
 const temp=mkdtempSync(join(tmpdir(),'galaga-rtp97-impl2-'));
 process.env.NODE_ENV='test';
 process.env.STORE_PATH=join(temp,'test-wallet.json');
@@ -51,10 +52,13 @@ async function request(path,body){
 async function reset(){
   const r=await request('/api/dev/reset',{});
   assert.equal(r.status,200);
+  const st=readStore();
+  delete st.players[PLAYER_ID];
+  writeStore(st);
 }
 async function start(bet=100){
   const r=await request('/api/sessions/start',{
-    playerId:'demo-player',difficulty:'medium',entryAmount:bet});
+    playerId:PLAYER_ID,difficulty:'medium',entryAmount:bet});
   assert.equal(r.status,201,JSON.stringify(r.data));
   return r.data;
 }
@@ -99,7 +103,7 @@ test('rejects unsafe/stale/undisclosed policy before LOCAL wager is debited',asy
   const orig=process.env.GALAGA_RTP97_SANDBOX_ACK;
   process.env.GALAGA_RTP97_SANDBOX_ACK='no';
   let res=await request('/api/sessions/start',{
-    playerId:'demo-player',difficulty:'medium',entryAmount:100});
+    playerId:PLAYER_ID,difficulty:'medium',entryAmount:100});
   assert.notEqual(res.status,201);
   process.env.GALAGA_RTP97_SANDBOX_ACK=orig;
   for(const bad of [
@@ -111,7 +115,7 @@ test('rejects unsafe/stale/undisclosed policy before LOCAL wager is debited',asy
   ]){
     configure(bad);
     res=await request('/api/sessions/start',{
-      playerId:'demo-player',difficulty:'medium',entryAmount:100});
+      playerId:PLAYER_ID,difficulty:'medium',entryAmount:100});
     assert.notEqual(res.status,201,JSON.stringify(bad));
   }
   const state=readStore();
@@ -170,7 +174,7 @@ test('actual backend settlement bookkeeping on 100 synthetic terminal decisions 
   assert.equal(betTotal,10000);
   assert.equal(wonTotal,9700);
   assert.equal(wonTotal/betTotal,.97);
-  assert.equal(store.players['demo-player'].balance,4700);
+  assert.equal(store.players[PLAYER_ID].balance,4700);
   assert.equal(store.transactions.filter(t=>t.type==='ENTRY_DEBIT').length,100);
   assert.equal(store.transactions.filter(t=>t.type==='CASHOUT_CREDIT').length,50);
   // No enemies, waves, bosses or player controls were physically simulated.
