@@ -8,10 +8,24 @@ function unavailable(code){
 }
 export function createProviderRtpClient({env=process.env,fetcher=globalThis.fetch}={}){
  const enabled=env.GAME_PROVIDER_RTP_ENABLED==='true';
+ // Explicit Render setting applies only to standalone fake-credit LOCAL rounds.
+ // The GProvider API remains authoritative for Provider-backed rounds.
+ const localDemoEnabled=env.GAME_RTP_LOCAL_DEMO_ENABLED==='true';
+ const localRaw=String(env.GAME_RTP_TARGET_BPS??'');
+ const localTargetBps=Number(localRaw);
+ if(localDemoEnabled && (!/^[0-9]{3,4}$/.test(localRaw) ||
+   !Number.isSafeInteger(localTargetBps) || localTargetBps<100 || localTargetBps>9900))
+   throw unavailable('LOCAL_RTP_TARGET_INVALID');
  const base=String(env.GAME_PROVIDER_RTP_API_URL||'').trim().replace(/\/+$/,'');
  const key=String(env.GAME_PROVIDER_RTP_ADAPTER_KEY||env[KEY_ENV]||'').trim();
  return Object.freeze({
   get enabled(){return enabled;},
+  get localDemoEnabled(){return localDemoEnabled;},
+  localSnapshot(){
+   return localDemoEnabled ? {
+     targetRtpBps:localTargetBps,revision:0,source:'RENDER_LOCAL_DEMO',applied:true
+   } : {...DEFAULT};
+  },
   async snapshot(){
    if(!enabled)return {...DEFAULT};
    const local=env.NODE_ENV!=='production'&&/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(base);
