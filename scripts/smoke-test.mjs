@@ -32,7 +32,7 @@ try {
   out = await request('/api/health');
   if (!out.response.ok || out.payload.phase !== 8) throw new Error('Phase 8 health check failed');
 
-  out = await request('/api/sessions/start', { method: 'POST', body: JSON.stringify({ playerId: 'demo-player', entryAmount: 50, difficulty: 'medium' }) });
+  out = await request('/api/sessions/start', { method: 'POST', body: JSON.stringify({ playerId: 'player-galaga_smoketest_12345', entryAmount: 50, difficulty: 'medium' }) });
   if (out.response.status !== 201) throw new Error(`Session start failed: ${JSON.stringify(out.payload)}`);
   const sessionId = out.payload.session.id;
 
